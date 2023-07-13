@@ -38,7 +38,6 @@ version 1.0
 # https://support.terra.bio/hc/en-us/articles/360042259232-Manage-data-automate-workflows-with-the-FISS-API
 
 
-
 # kill 15?
 # ps -e|grep -A500 tee|grep bash|head -n 1|awk '{print $1}'|xargs kill -9
 # root@054a5a697e0f:/cromwell_root# ps -e
