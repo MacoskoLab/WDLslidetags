@@ -1,3 +1,32 @@
+version 1.0
+
+# TODO timeout, or email if runs for more than a day (didn't die)
+# kill 15?
+# ps -e|grep -A500 tee|grep bash|head -n 1|awk '{print $1}'|xargs kill -9
+# root@054a5a697e0f:/cromwell_root# ps -e
+# PID TTY          TIME CMD
+# 1 ?        00:00:00 bash
+# 13 ?        00:00:00 tee
+# 14 ?        00:00:00 tee
+# 15 ?        00:00:00 bash
+# 16 ?        00:00:00 socat
+# 17 pts/0    00:00:00 bash
+# 920 pts/0    00:00:00 ps
+
+# TODO: make the sheet support worksheets other than Tags (read_sheet.py)
+# TODO: other counts types - currently assumes that the input is Tags
+# TODO: upload resource logging and outs logging
+# TODO: better matching, positioning, plots (.jl/.R), joinpath
+# TODO make preemptible
+# TODO remove unneeded files from the BCL (.tifs?)
+# TODO record reference
+# TODO: check docker size: apt install ncdu; ncdu
+# TODO: add support for commas in the spreadsheet
+# TODO: "_" vs "_S" and/in file size calculation
+
+# real TODOs:
+# umi collapsing / chimerism
+# check if the r worked
 
 task read_sheet {
   input {
