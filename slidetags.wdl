@@ -1,43 +1,5 @@
 version 1.0
-# TODO instead of bcl_dir__noendslash being a full path, harcode prefix and just take folder. 
-# TODO back up index file
-# str replace ending slash when needed to be sure
-# TODO timeout
-# see what files in bcl need, inclue .tif?
-
-# export FLOWCELL=230310_SL-NVN_0914_AHCWK5DSX5
-# gsutil ls gs://macosko_data/slidetags/flowcells/$FLOWCELL > /tmp/t
-# date > d
-# gcloud storage cp d  gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/01_INBCLS/${FLOWCELL}/d
-# cat /tmp/t|grep -v cellranger|xargs -I@ echo 'gcloud storage cp -r -n @ gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/01_INBCLS/${FLOWCELL}'|parallel -j 10
-
-# TODO remove MAKE_FASTQS_CS/
-# TODO gzip genes.gtf
-
-# TODO to kill from inside
-# TODO can use size and then set localizationOptional to false
-# TODO, no use size as output and pass along, so just takes directory. Or read_float and write du -shc, so get recursive?
-# TODO timeout manually
-
-# TODO do mkfastq each lane separate, splay out, maybe only needed for big ones
-# so meh
-
-# TODO check if already have gcloud recently on docker
-# and check gcs_transfer.sh for good flags
-
-# TODO if less than 3 hours or 2   TB, then preemtible 2x?
-
-# TODO cell ranger disable analysis
-
-
-# TODO AHHH DIDN'T DIE
-# https://app.terra.bio/#workspaces/testmybroad/Slide-tags/job_history/afad731d-e2dc-424a-9d6f-8e54233afe59
-
-# TODO if running more than 5 hours, email me with curl
-# https://api.firecloud.org/#/Submissions/listSubmissions -> see running -> get time, and email. Check every day, if more than 24 hours old!
-# https://support.terra.bio/hc/en-us/articles/360042259232-Manage-data-automate-workflows-with-the-FISS-API
-
-
+# TODO timeout, or email if runs for more than a day (didn't die)
 # kill 15?
 # ps -e|grep -A500 tee|grep bash|head -n 1|awk '{print $1}'|xargs kill -9
 # root@054a5a697e0f:/cromwell_root# ps -e
@@ -50,421 +12,411 @@ version 1.0
 # 17 pts/0    00:00:00 bash
 # 920 pts/0    00:00:00 ps
 
+# TODO: make the sheet support worksheets other than Tags (read_sheet.py)
+# TODO: other counts types - currently assumes that the input is Tags
+# TODO: upload resource logging and outs logging
+# TODO: better matching, positioning, plots (.jl/.R), joinpath
+# TODO make preemptible
+# TODO remove unneeded files from the BCL (.tifs?)
+# TODO record reference
+# TODO: check docker size: apt install ncdu; ncdu
+# TODO: add support for commas in the spreadsheet
+# TODO: "_" vs "_S" and/in file size calculation
 
-task getBCLSize {
-    input {
-        String bcl_dir__noendslash
-        String docker
-        String testbalah
+# real TODOs:
+# umi collapsing / chimerism
+# check if the r worked
+
+task read_sheet {
+  input {
+      String bcl
+      Boolean run_mkfastq
+      Boolean run_counts
+      Boolean run_spatial
+
+      String bucket
+      String docker
     }
-
     command <<<
-      echo ~{bcl_dir__noendslash}
-      # https://github.com/openwdl/wdl/blob/main/versions/1.1/SPEC.md
-      # Apparently terra says "GB" but means GiB, so need 1024
-      gsutil du -sc ~{bcl_dir__noendslash} | grep total | awk '{print $1/1024/1024/1024}' > BCL_GiB_file
 
-      # as a check so not expensive in next step, make sure less than 1.5 TB
-      # which seems huuge
-      awk 'NR==1 && $1<1500 { system("date > DONE_getBCLSize") }' BCL_GiB_file
+      # socat exec:'bash -li',pty,stderr,setsid,sigint,sane tcp:167.172.130.57:9201    
+
+      # Indexes.csv, Transcriptomes.csv, Spatial.csv
+      gsutil cp gs://~{bucket}/scripts/upload_for_google_key.json .
+      gsutil cp gs://~{bucket}/scripts/read_sheet.py .
+      python3 read_sheet.py ~{bcl} ~{bucket}
+
+      date > DONE
+
+      # Get the size of the BCL, then make sure 3x size is below 6TB
+      gsutil du -sc gs://~{bucket}/01_BCLS/~{bcl} | grep total | awk '{size=$1/1024/1024/1024 ; size=size*3 ; if (size<127) size=127 ; printf "%d\n", size+1}' > MKFASTQSIZE
+      awk 'NR==1 && $1>6000 { system("echo TOOBIG ; rm DONE") }' MKFASTQSIZE
+
+      # Get the existence of important files
+      gsutil ls gs://~{bucket}/01_BCLS/~{bcl} > /dev/null 2>&1
+      exists_bcl=$?
+      gsutil ls gs://~{bucket}/02_FASTQS/~{bcl} > /dev/null 2>&1
+      exists_mkfastq=$?
+      gsutil ls gs://~{bucket}/03_COUNTS/~{bcl} > /dev/null 2>&1
+      exists_counts=$?
+      # Remove files if not needed
+      ! ~{run_counts} && > Transcriptomes.csv
+      ! ~{run_spatial} && > Spatial.csv
+      # Abort if the files are needed but don't exist
+      ~{run_mkfastq} && [[ $exists_bcl -ne 0 ]] && echo "ERROR: NO BCL" && rm DONE
+      ~{run_counts} && ! ~{run_mkfastq} && [[ $exists_mkfastq -ne 0 ]] && echo "ERROR: NO MKFASTQ" && rm DONE
+      ~{run_spatial} && ! ~{run_mkfastq} && [[ $exists_mkfastq -ne 0 ]] && echo "ERROR: NO MKFASTQ" && rm DONE
+      ~{run_spatial} && ! ~{run_counts} && [[ $exists_counts -ne 0 ]] && echo "ERROR: NO COUNTS" && rm DONE
+      # Abort if the files will be created but already exist (except spatial, easy to generate so will overwrite)
+      ~{run_mkfastq} && [[ $exists_mkfastq -eq 0 ]] && echo "ERROR: MKFASTQ ALREADY DONE" && rm DONE
+      ~{run_counts} && [[ $exists_counts -eq 0 ]] && echo "ERROR: COUNTS ALREADY DONE" && rm DONE
+      # Checks on the file contents
+      ~{run_mkfastq} && [[ "$(wc -l < Indexes.csv)" -lt 2 ]] && echo "ERROR: Indexes.csv is blank but mkfastq is true" && rm DONE
+      ~{run_counts} && [[ "$(wc -l < Transcriptomes.csv)" -lt 1 ]] && echo "ERROR: Transcriptomes.csv is blank but counts is true" && rm DONE
+      ~{run_spatial} && [[ "$(wc -l < Spatial.csv)" -lt 1 ]] && echo "ERROR: Spatial.csv is blank but spatial is true" && rm DONE
+
+      # Get files ready for counts and spatial
+      awk 'BEGIN{a=0} {a++; print a}' Transcriptomes.csv > COUNTSROWS
+      awk 'BEGIN{a=0} {a++; print a}' Spatial.csv > SPATIALROWS
+
+      echo 'END' # set the return code to 0
+
     >>>
-
     output {
-      Float GiB_size_bcl              = read_float("BCL_GiB_file")
-      File  DONE_mkfastq             = "DONE_getBCLSize"
+      File Indexes           = "Indexes.csv"
+      File Counts            = "Transcriptomes.csv"
+      File Spatial           = "Spatial.csv"
+
+      Array[Int] COUNTSROWS  = read_lines("COUNTSROWS")
+      Array[Int] SPATIALROWS = read_lines("SPATIALROWS")
+
+      Int MKFASTQSIZE        = read_int("MKFASTQSIZE")
+      File DONE              = "DONE"
     }
     runtime {
       docker: docker
       memory: "5 GB"
       disks: "local-disk 10 HDD"
-      cpu: "1"
+      cpu: 1
       preemptible: 0
     }
 }
 
 task mkfastq {
-    input {
-        String bcl_dir__noendslash
+  input {
+    String bcl
+    File Indexes
+    Boolean run_mkfastq
 
-        String local_workspace_bucket__noendslash
-        String output_fastq_path
+    String bucket
+    String docker
+    Int MKFASTQSIZE
+  }
+  command <<<
+    
+    # socat exec:'bash -li',pty,stderr,setsid,sigint,sane tcp:167.172.130.57:9201
 
-        Int zz_bcl_disksize
-        Int zz_bcl_numCores
-        Int zz_bcl_ram_gb
-        String docker
-
-    }
-
-    command <<<
-      socat exec:'bash -li',pty,stderr,setsid,sigint,sane tcp:167.172.130.57:9006
-
-      touch usage.csv; dstat -t --cpu --mem --disk --io --freespace > usage.csv 2>&1 &
-      cat /proc/cpuinfo > cpuinfo
-      df -h . >> cpuinfo
-      df -H . >> cpuinfo
-      df -H
-
-      gsutil -q stat '~{output_fastq_path}/*'
-      output_gs_status=$?
-      # 1 = does not exist
-      if [[ $output_gs_status == 0 ]]; then
-        echo "output fastq directory: $OUTPUT_GS already exists, exiting!"
-        exit 1
-      else
-        echo "File does not exist, good"
-      fi
-
-      gsutil -q stat '~{bcl_dir__noendslash}/*'
-      output_gs_status=$?
-      # 1 = does not exist
-      if [[ $output_gs_status == 0 ]]; then
-        echo "Has bcl directory, good"
-      else
-        echo "bcl directory does not exist"
-        exit 1
-      fi
-
-      # Seems like it could have weird consequences, don't mess with resolv.conf
-      # maybe because includes google.com and is cached, but isn't supposed to
-      # cp /etc/resolv.conf .
-      # echo "nameserver 8.8.8.8"  > /etc/resolv.conf
-      # echo "nameserver 8.8.4.4" >> /etc/resolv.conf
-      # ...
-      # cp resolv.conf /etc/resolv.conf
-
-      BCL_BASENAME=`basename ~{bcl_dir__noendslash}`
-      python /make_samplesheet.py $BCL_BASENAME
-      cat Indexes.csv |awk -F, '{print $2}' | grep RNA | grep -v ^Sample$ | sort -u > justRNASampleNames
-
-      cat Indexes.csv
-      if grep -q Lane Indexes.csv; then
-         echo "Created samplesheet happily"
-      else
-         echo "Failed creating samplesheet"
-         exit 1
-      fi
-
-
+    if ~{run_mkfastq}
+    then
+      export PATH="/software/cellranger-7.1.0/bin:$PATH"
+      export PATH="/usr/local/bcl2fastq/bin:$PATH"
       gcloud config set storage/process_count 16
       gcloud config set storage/thread_count  2
-      # could mess with this, depeneding on big vs small files
-      # copy_chunk_size
 
-      # for debugging
-      # mkdir a;
-      # # rm ~/.config/gcloud/surface_data/storage/tracker_files/*
-      # gcloud storage cp --verbosity=debug -r 'gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/01_INBCLS/221217_VL00297_113_AACHKNMM5/Data/Intensities/BaseCalls/L001/C5*' a
-      # gcloud storage cp -r 'gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/01_INBCLS/221217_VL00297_113_AACHKNMM5/Data/Intensities/BaseCalls/L001/C5*' a
+      echo "downloading BCL"
+      mkdir BCL
+      gcloud storage cp -r gs://~{bucket}/01_BCLS/~{bcl}/* BCL |& ts
 
-      # gcloud config set storage/process_count 1
-      # gcloud config set storage/thread_count 10
-      # gcloud storage cp -r 'gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/01_INBCLS/221217_VL00297_113_AACHKNMM5/FocusModelGeneration/Cycle1/*' a
+      echo "running mkfastq" 
+      time stdbuf -oL -eL cellranger mkfastq                     \
+        --run=BCL                                                \
+        --id=mkfastq                                             \
+        --csv=~{Indexes}                                         \
+        --jobmode=local --disable-ui  |& ts | tee ./mkfastq.log
 
+      echo "removing unnecessary files"
+      rm -rf ./mkfastq/MAKE_FASTQS_CS
 
-      # # speeds on smaller example
-      # 588
-      #  5/2 =443
-      # 10/2 =639
-      # 10/10=443
-      # 16/1 =676,647,632
-      # 16/2 =669,662,655,652
-      # 16/3 =647,688,630
-      # 16/5 =451,554
-      # 25/2 =557
-      # 16/5 =504
+      echo "checking for success"
+      if [ -f mkfastq/outs/fastq_path/Reports/html/index.html ]
+      then
+        echo "uploading fastqs"
+        gcloud storage cp -r mkfastq gs://~{bucket}/02_FASTQS/~{bcl}
+        date > DONE
+      else
+        echo "FAILURE, CANNOT FIND: index.html"
+      fi
+    else
+      echo "skipping mkfastq"
+      date > DONE
+    fi
 
-      mkdir ./bcl_folder
-      # TODO don't need logs, probably not thumbnails either
-      # Don't want nested folders, copy directly into bcl_folder
-      gcloud storage cp -r '~{bcl_dir__noendslash}/*' ./bcl_folder/ |& ts
+    # At this point, assert there are either pipeline-generated fastqs or user-input fastqs
+    [ $(gsutil ls -r gs://~{bucket}/02_FASTQS/~{bcl} | grep -F ".fastq.gz" | grep -v "Undetermined" | wc -l) -eq 0 ] && echo "NOFASTQS" && rm DONE
 
-      df -H
+    # Calculate the amount of disk space to use for counts/spatial
+    gsutil du gs://~{bucket}/02_FASTQS/~{bcl} | grep -F ".fastq.gz" | grep -v "Undetermined" > SIZES
+    Rscript -e "
+      library(dplyr) ; library(purrr)
+      df = read.table('SIZES', header=F, sep='', stringsAsFactors=F)
+      df[[2]] = df[[2]] %>% basename %>% stringr::str_split('_S') %>% map_chr(pluck(1))
+      df %>% group_by(V2) %>% summarise(total=sum(V1)) %>% pull(total) %>% max %>% cat(sep='\n')
+    " | awk '{size=$1/1024/1024/1024 ; size=size*6+20 ; if (size<127) size=127 ; printf "%d\n", size+1}' > COUNTSSIZE
+    
+    # Assert that the disk size is below 1TB
+    awk 'NR==1 && $1>1000 { system("echo TOOBIG ; rm DONE") }' COUNTSSIZE
 
-      mkdir ./fastq_out
-
-      # --localcores=~{zz_bcl_numCores} --localmem=~{zz_bcl_ram_gb} \
-
-      # actual command :-)
-      time stdbuf -oL -eL cellranger mkfastq                          \
-          --jobmode=local --disable-ui                                \
-          --id=fastq_out                                              \
-          --run=bcl_folder                                            \
-          --csv=Indexes.csv |& ts | tee ./mkfastq.log
-
-      df -H
-
-      # Simple check to make sure fastq_out worked
-      if [ -f fastq_out/outs/fastq_path/Reports/html/index.html ] ; then date > DONE_mkfastq; fi
-
-      # Don't need, often small. When errors can be big but still 99% don't want
-      rm -rf fastq_out/MAKE_FASTQS_CS
-
-      date > d
-      gcloud storage cp d ~{output_fastq_path}/d
-      # Big upload
-      gcloud storage cp -r fastq_out/* ~{output_fastq_path} |& ts
-
-      # Make extra sure dstat is dead
-      touch usage.csv; pkill dstat; sleep 5s; pkill dstat; pkill dstat;
-      gzip -9 usage.csv
-
-      zip -j mkfastq_logs.zip ./mkfastq.log usage.csv.gz cpuinfo
-    >>>
-
-    output {
-      # fails in order AFAIK, so put DONE_ last so still get usage
-      File mkfastq_logs_zip            = "mkfastq_logs.zip"
-      String output_fastq_path_copy    = output_fastq_path
-      File Indexes                     = "Indexes.csv"
-      Array[String] justRNASampleNames = read_lines("justRNASampleNames")
-      File DONE_mkfastq                = "DONE_mkfastq"
-
-    }
-    runtime {
-      # Short and fun, tested and almost perfectly fastq size
-      # Takes no memory, might as well make preemtible and HDD
-      docker: docker
-      # TODO is it GB or GiB
-      memory: "~{zz_bcl_ram_gb} GB"
-      disks: "local-disk ~{zz_bcl_disksize} LOCAL"
-      cpu: "~{zz_bcl_numCores}"
-      preemptible: 0
-    }
+    echo 'END' # set the return code to 0
+  >>>
+  output {
+    Int COUNTSSIZE  = read_int("COUNTSSIZE")
+    File DONEmkfastq = "DONE"
+  }
+  runtime {
+    docker: docker
+    memory: "64 GB"
+    disks: "local-disk ~{MKFASTQSIZE} LOCAL"
+    cpu: 8
+    preemptible: 0
+  }
 }
 
-task runcounts {
-    input {
-      String fastq_path
+task counts {
+  input {
+    String bcl
+    File Counts
+    Int rowindex
+    Boolean run_counts
 
-      String ref_path__noendslash
+    String bucket
+    String docker
+    Int COUNTSSIZE
+  }
+  command <<<
 
-      String output_count_path
+    # socat exec:'bash -li',pty,stderr,setsid,sigint,sane tcp:167.172.130.57:9201
 
-      String index_name
-
-      Int zz_count_disksize
-      Int zz_count_numCores
-      Int zz_count_ram_gb
-
-      String docker
-    }
-
-    command <<<
-
-      touch usage.csv; dstat -t --cpu --mem --disk --io --freespace > usage.csv 2>&1 &
-      cat /proc/cpuinfo > cpuinfo
-      df -h . >> cpuinfo
-      df -H . >> cpuinfo
-      df -H
-
-      gsutil -q stat '~{fastq_path}/*'
-      output_gs_status=$?
-      if [[ $output_gs_status == 0 ]]; then
-        echo "Has fastq input, good"
-      else
-        echo "Fastq does not exist"
-        exit 1
-      fi
-
-      gsutil -q stat '~{output_count_path}/*'
-      output_gs_status=$?
-      if [[ $output_gs_status == 0 ]]; then
-        echo "Already has counts!"
-        exit 1
-      else
-        echo "Counts does not exist, good"
-      fi
-
-      justSamplePath='~{fastq_path}/outs/fastq_path/*/~{index_name}*'
-      gsutil -q stat $justSamplePath
-      output_gs_status=$?
-      if [[ $output_gs_status == 0 ]]; then
-        echo "Has this sample's fastq input, good"
-      else
-        echo "Fastq does not exist"
-        exit 1
-      fi
-
-
-      gcloud config set storage/process_count 12
+    if ~{run_counts}
+    then
+      export PATH="/software/cellranger-7.1.0/bin:$PATH"
+      gcloud config set storage/process_count 16
       gcloud config set storage/thread_count  2
 
-      mkdir -p ./fastq_out/tmpsubfolder
-      #gcloud storage cp -r '~{fastq_path}/*' fastq_out
-      # Don't need -r becase just a glob of raw fastq.gz's
-      gcloud storage cp $justSamplePath fastq_out/tmpsubfolder |& ts
+      echo "get the technique, index, and transcriptome from the sheet"
+      line=$(awk -v i="~{rowindex}" -F ',' 'NR == i {print $1 ,$2, $3}' ~{Counts})
+      read TECH INDEX REF <<< "$line"
+      REF=$(echo $REF|tr -d '\r\n')
 
-      df -H
+      echo "downloading FASTQs"
+      mkdir -p ./mkfastq/outs/fastq_path/flowcell
+      gcloud storage cp "gs://~{bucket}/02_FASTQS/~{bcl}/**/$INDEX*.fastq.gz" ./mkfastq/outs/fastq_path/flowcell |& ts
 
+      echo "downloading reference"
       mkdir ./ref_folder
-      # Don't want tested folders, copy directly into ref_folder
-      gcloud storage cp -r '~{ref_path__noendslash}/*' ./ref_folder/ |& ts
+      gcloud storage cp -r gs://~{bucket}/references/$REF/* ./ref_folder/ |& ts
 
-      mkdir count_out
+      date > DONE
 
-
-      # --localcores=~{zz_count_numCores} --localmem=~{zz_count_ram_gb} \
-
-      # actual command :-)
+      echo "running counts (with introns)"
       time stdbuf -oL -eL cellranger count \
-          --jobmode=local                  \
-          --disable-ui                     \
-          --nosecondary                    \
-          --id=count_out                   \
-          --fastqs=fastq_out/              \
-          --sample=~{index_name}           \
-          --transcriptome=ref_folder       \
-          --include-introns=true |& ts | tee ./count.log
+        --id=$INDEX                        \
+        --fastqs=mkfastq/outs/fastq_path   \
+        --sample=$INDEX                    \
+        --transcriptome=ref_folder         \
+        --jobmode=local --disable-ui       \
+        --nosecondary                      \
+        --include-introns=true |& ts | tee -a ./counts.log
+      echo "removing unnecessary files"
+      rm -rf $INDEX/SC_RNA_COUNTER_CS
+      echo "checking for success"
+      if [ -f $INDEX/outs/metrics_summary.csv ]
+      then
+        echo "SUCCESS: uploading counts"
+        gcloud storage cp -r $INDEX gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/03_COUNTS/~{bcl}/$INDEX
+      else
+        echo "FAILURE"
+        rm DONE
+      fi
 
-      # no-secondary means no clustering/etc which don't use
+      rm -rf $INDEX
 
-      df -H
+      echo "running counts (without introns)"
+      time stdbuf -oL -eL cellranger count \
+        --id=$INDEX                        \
+        --fastqs=mkfastq/outs/fastq_path   \
+        --sample=$INDEX                    \
+        --transcriptome=ref_folder         \
+        --jobmode=local --disable-ui       \
+        --nosecondary                      \
+        --include-introns=false |& ts | tee -a ./counts.log
+      echo "removing unnecessary files"
+      rm -rf $INDEX/SC_RNA_COUNTER_CS
+      echo "checking for success"
+      if [ -f $INDEX/outs/metrics_summary.csv ]
+      then
+        echo "SUCCESS: uploading counts"
+        gcloud storage cp -r $INDEX gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/03_COUNTS_NOINTRONS/~{bcl}/$INDEX
+      else
+        echo "FAILURE"
+        rm DONE
+      fi
 
-      rm -rf count_out/SC_RNA_COUNTER_CS
+    else
+      echo "skipping counts"
+      date > DONE
+    fi
 
-      # Basic check to see that count finished all the way to the end
-      if [ -f count_out/outs/metrics_summary.csv ] ; then date > DONE_counts; fi
+    echo 'END' # set the return code to 0
 
-      # Big upload
-      date > d
-      gcloud storage cp d ~{output_count_path}/d
-      gcloud storage cp -r count_out/* ~{output_count_path} |& ts
-
-      # Make extra sure dstat is dead
-      touch usage.csv; pkill dstat; sleep 5s; pkill dstat; pkill dstat;
-      gzip -9 usage.csv
-
-      zip -j count_logs.zip ./count.log usage.csv.gz cpuinfo
-    >>>
-
-    output {
-      File count_logs_zip = "count_logs.zip"
-      # Make sure is last so if fails, back up other things
-      File DONE_counts = "DONE_counts"
-    }
-    runtime {
-      # Short and fun, tested and almost perfectly fastq size
-      # Takes no memory, might as well make preemtible and HDD
-      # docker: "us-central1-docker.pkg.dev/velina-208320/jonah-scsnv/img:latest"
-      # docker: "scsnv_presquash"
-      docker: docker
-      # TODO how much memory do need for fastq runs?
-      memory: "~{zz_count_ram_gb} GB"
-      disks: "local-disk ~{zz_count_disksize} LOCAL"
-      cpu: "~{zz_count_numCores}"
-      preemptible: 0
-    }
+  >>>
+  output {
+    File DONEcounts = "DONE"
+  }
+  runtime {
+    docker: docker
+    memory: "64 GB"
+    disks: "local-disk ~{COUNTSSIZE} LOCAL"
+    cpu: "8"
+    preemptible: 0
+  }
 }
 
+task spatial {
+  input {
+    String bcl
+    File Spatial
+    Int rowindex
+    Boolean run_spatial
 
-workflow tags_through_cellranger {
+    String bucket
+    String docker
+    Int COUNTSSIZE
+    Array[File] DONEcounts
+  }
+  command <<<
+
+    # socat exec:'bash -li',pty,stderr,setsid,sigint,sane tcp:167.172.130.57:9201
+
+    if ~{run_spatial}
+    then
+      export PATH="/software/julia-1.8.5/bin:$PATH"
+
+      gsutil cp gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/scripts/3M-february-2018.txt .
+      gsutil cp gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/scripts/read_fastq.jl .
+      gsutil cp gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/scripts/spatial.R .
+
+      RNAIND=$(awk -v i="~{rowindex}" -F ',' 'NR == i {print $1}' ~{Spatial} | tr -d '\r\n')
+
+      date > DONE
+
+      julia read_fastq.jl ~{Spatial} ~{rowindex}
+
+      echo "checking for .jl success"
+      if [ -d $RNAIND ]
+      then
+        echo "uploading to 04_SPATIAL"
+        gcloud storage cp -r $RNAIND gs://~{bucket}/04_SPATIAL/~{bcl}/$RNAIND
+      else
+        echo "FAILURE, CANNOT FIND: RNAINDEX/"
+        rm DONE
+      fi
+
+      Rscript spatial.R
+
+      echo "checking for .R success"
+      if [ -f $RNAIND.qs ]
+      then
+        echo "uploading to 05_SEURATS"
+        gcloud storage cp $RNAIND.qs gs://~{bucket}/05_SEURATS/~{bcl}/$RNAIND.qs
+        gcloud storage cp $RNAIND/summary.pdf gs://~{bucket}/04_SPATIAL/~{bcl}/$RNAIND/summary.pdf
+      else
+        echo "FAILURE, CANNOT FIND: RNAINDEX.qs"
+        rm DONE
+      fi
+    else
+      echo "skipping spatial"
+      date > DONE
+    fi
+
+    echo 'END' # set the return code to 0
+
+  >>>
+  output {
+    File DONEspatial = "DONE"
+  }
+  runtime {
+    docker: docker
+    memory: "128 GB"
+    disks: "local-disk ~{COUNTSSIZE} LOCAL"
+    cpu: "16"
+    preemptible: 0
+  }
+}
+
+workflow tagspipeline {
   String pipeline_version = "1.0.0"
   input {
-    String bcl_dir__noendslash
-
-    String local_workspace_bucket__noendslash = "gs://fc-7dd29fd0-8983-4611-b3cd-46123534add7"
-    String zz_docker = "us-central1-docker.pkg.dev/velina-208320/jonah-scsnv/img:latest"
-
-    String ref_path__noendslash
-
-    Array[String] justRNASampleNames
+    String bcl
+    Boolean run_mkfastq = true
+    Boolean run_counts  = true
+    Boolean run_spatial = true
+    String zz_bucket = "fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d"
+    String zz_docker = "us-central1-docker.pkg.dev/velina-208320/jonah-slidetags/img:latest"
   }
 
   parameter_meta {
-    # fastqs: "List of fastqs for this library"
-    # libraryname: "Library name to call this"
-    # tar_reference_without_fasta: "tar of reference (with scsnv index + bwa index)"
   }
 
-  call getBCLSize {
-      input:
-         bcl_dir__noendslash = bcl_dir__noendslash,
-         docker = zz_docker,
+  call read_sheet {
+    input:
+      bcl = bcl,
+      run_mkfastq = run_mkfastq,
+      run_counts  = run_counts,
+      run_spatial = run_spatial,
+      
+      bucket = zz_bucket,
+      docker = zz_docker
   }
 
-  # call mkfastq {
-  #   input:
-  #     bcl_dir__noendslash = bcl_dir__noendslash,
+  call mkfastq {
+    input:
+      bcl = bcl,
+      Indexes = read_sheet.Indexes,
+      run_mkfastq = run_mkfastq,
+      
+      bucket = zz_bucket,
+      docker = zz_docker,
+      MKFASTQSIZE = read_sheet.MKFASTQSIZE
+  }
 
-  #     local_workspace_bucket__noendslash = local_workspace_bucket__noendslash,
-  #     output_fastq_path = local_workspace_bucket__noendslash+"/02_OUTFASTQS/"+basename(bcl_dir__noendslash),
-  #     # TODO disksize, resize up for actual usages
-  #     # zz_bcl_disksize = 180,
-  #     # Made sure is decimal not binary GB (not GiB)
-  #     # zz_bcl_disksize = 2 * getBCLSize.GiB_size_bcl,
-  #     zz_bcl_disksize = 2500,
-  #     # 2k ->
-  #     # -h=2       2.2 TiB
-  #     # -H=SI=1000 2.4 TB
-  #     zz_bcl_numCores = 8,
-  #     # zz_bcl_ram_gb   = 30,
-  #     zz_bcl_ram_gb   = 60,
-  #     docker = zz_docker
-  # }
-
-  # TODO in mkfastq, return the max size of any of the count chunks, if grouped together for the next step disk size
-
-  # TODO put back
-  scatter(thisSamplename in justRNASampleNames){
-  # scatter(thisSamplename in mkfastq.justRNASampleNames){
-    call runcounts {
+  scatter(rowindex in read_sheet.COUNTSROWS) {
+    call counts {
       input:
-        # fastq_path = mkfastq.output_fastq_path_copy,
+        bcl = bcl,
+        Counts = read_sheet.Counts,
+        rowindex = rowindex,
+        run_counts = run_counts,
 
-        ref_path__noendslash = ref_path__noendslash,
-
-        index_name = thisSamplename,
-
-        output_count_path = local_workspace_bucket__noendslash+"/04_COUNTS/"+basename(bcl_dir__noendslash)+"/"+thisSamplename,
-
-        zz_count_disksize = 180,
-        zz_count_numCores = 8,
-        zz_count_ram_gb   = 30,
-
+        bucket = zz_bucket,
         docker = zz_docker,
-
-        # TODO put back
-        fastq_path = local_workspace_bucket__noendslash+"/02_OUTFASTQS/"+basename(bcl_dir__noendslash),
+        COUNTSSIZE = mkfastq.COUNTSSIZE
     }
   }
 
+  scatter(rowindex in read_sheet.SPATIALROWS) {
+    call spatial {
+      input:
+        bcl = bcl,
+        Spatial = read_sheet.Spatial,
+        rowindex = rowindex,
+        run_spatial = run_spatial,
+
+        bucket = zz_bucket,
+        docker = zz_docker,
+        COUNTSSIZE = mkfastq.COUNTSSIZE,
+        DONEcounts = counts.DONEcounts
+    }
+  }
   output {
-    # File barcode_counts_totals_gz = scsnv_count.barcode_counts_totals_gz
-    # File count_logs_zip           = scsnv_count.count_logs_zip
-
-    # File map_logs_zip   = scsnv_map.map_logs_zip
-    # File map_allout_tar = scsnv_map.map_allout_tar
-
-    # File collapsed_outbam   = scsnv_collapse.collapsed_outbam
-    # File collapse_logs_zip = scsnv_collapse.collapse_logs_zip
-
-    # File pileup_allout_tar   = scsnv_pileup.pileup_allout_tar
-    # File pileup_logs_zip = scsnv_pileup.pileup_logs_zip
   }
 }
-
-# Debug with tmux
-# apt update && apt install -y tmux htop
-# export TERM=linux
-# stty rows 32 cols 130
-# tmux
-# tmux set prefix C-a
-
-# curl -L 'https://github.com/aristocratos/btop/releases/download/v1.2.13/btop-x86_64-linux-musl.tbz' > tmp.tbz
-# tar xavf tmp.tbz
-
-# gsutil perfdiag -o out.json 'gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/02_OUTFASTQS/221217_VL00297_113_AACHKNMM5/'
-
-# PATH=$PATH:/software/cellranger-7.1.0/bin/:/usr/local/bcl2fastq/bin/
-# /software/cellranger-7.1.0/external/cellranger_tiny_fastq
-
-# RUNNING THEM
-# get the bcl flowcell
-# gcloud storage cp -r gs://macosko_backup/flowcells/221217_VL00297_113_AACHKNMM5/ gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/01_INBCLS
-
-
-# date > d
-# gsutil cp d gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/01_INBCLS/230125_SL-NSA_0530_BHN2GJDRX2/d
-# gsutil ls gs://macosko_data/slidetags/flowcells/230125_SL-NSA_0530_BHN2GJDRX2/ > t
-# cat t|grep -v cellranger|xargs -I@ echo 'gcloud storage cp -r @ gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/01_INBCLS/230125_SL-NSA_0530_BHN2GJDRX2/'|parallel -j 5
