@@ -6,9 +6,9 @@ workflow tagspipeline {
   String pipeline_version = "1.0.0"
   input {
     String bcl
-    Boolean run_mkfastq = true
-    Boolean run_counts  = true
-    Boolean run_spatial = true
+    Boolean run1_mkfastq = true
+    Boolean run2_counts  = true
+    Boolean run3_spatial = true
     String zz_bucket = "fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d"
     String zz_docker = "us-central1-docker.pkg.dev/velina-208320/jonah-slidetags/img:latest"
   }
@@ -16,18 +16,18 @@ workflow tagspipeline {
   parameter_meta {
   }
 
-  call tasks.read_sheet {
+  call tasks.read_sheet as read_sheet {
     input:
       bcl = bcl,
-      run_mkfastq = run_mkfastq,
-      run_counts  = run_counts,
-      run_spatial = run_spatial,
+      run_mkfastq = run1_mkfastq,
+      run_counts  = run2_counts,
+      run_spatial = run3_spatial,
       
       bucket = zz_bucket,
       docker = zz_docker
   }
 
-  call tasks.mkfastq {
+  call tasks.mkfastq as mkfastq {
     input:
       bcl = bcl,
       Indexes = read_sheet.Indexes,
@@ -39,7 +39,7 @@ workflow tagspipeline {
   }
 
   scatter(rowindex in read_sheet.COUNTSROWS) {
-    call tasks.counts {
+    call tasks.counts as counts {
       input:
         bcl = bcl,
         Counts = read_sheet.Counts,
@@ -53,7 +53,7 @@ workflow tagspipeline {
   }
 
   scatter(rowindex in read_sheet.SPATIALROWS) {
-    call tasks.spatial {
+    call tasks.spatial as spatial {
       input:
         bcl = bcl,
         Spatial = read_sheet.Spatial,
