@@ -178,7 +178,7 @@ task compute_sizes {
           echo "CANNOT FIND THE FASTQS FOR $index"
           echo "0" >> SIZES
         fi
-      done < ~{TSV}
+      done < ~{array2D}
 
     >>>
   output {
