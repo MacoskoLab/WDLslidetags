@@ -195,3 +195,81 @@ task compute_sizes {
 
 
 
+
+task spatial {
+  input {
+    String bcl
+    File Spatial
+    Int rowindex
+    Boolean run_spatial
+
+    String bucket
+    String docker
+    Int COUNTSSIZE
+    Array[File] DONEcounts
+  }
+  command <<<
+
+    # socat exec:'bash -li',pty,stderr,setsid,sigint,sane tcp:167.172.130.57:9201
+
+    # OVERWRITE!
+
+    if ~{run_spatial}
+    then
+      export PATH="/software/julia-1.8.5/bin:$PATH"
+
+      gsutil cp gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/scripts/3M-february-2018.txt .
+      gsutil cp gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/scripts/read_fastq.jl .
+      gsutil cp gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/scripts/spatial.R .
+
+      RNAIND=$(awk -v i="~{rowindex}" -F ',' 'NR == i {print $1}' ~{Spatial} | tr -d '\r\n')
+
+      date > DONE
+
+      julia read_fastq.jl ~{Spatial} ~{rowindex}
+
+      echo "checking for .jl success"
+      if [ -d $RNAIND ]
+      then
+        echo "uploading to 04_SPATIAL"
+        gcloud storage cp -r $RNAIND gs://~{bucket}/04_SPATIAL/~{bcl}/$RNAIND
+      else
+        echo "FAILURE, CANNOT FIND: RNAINDEX/"
+        rm DONE
+      fi
+
+      Rscript spatial.R
+
+      echo "checking for .R success"
+      if [ -f $RNAIND.qs ]
+      then
+        echo "uploading to 05_SEURATS"
+        gcloud storage cp $RNAIND.qs gs://~{bucket}/05_SEURATS/~{bcl}/$RNAIND.qs
+        gcloud storage cp $RNAIND/summary.pdf gs://~{bucket}/04_SPATIAL/~{bcl}/$RNAIND/summary.pdf
+      else
+        echo "FAILURE, CANNOT FIND: RNAINDEX.qs"
+        rm DONE
+      fi
+    else
+      echo "skipping spatial"
+      date > DONE
+    fi
+
+    echo 'END' # set the return code to 0
+
+  >>>
+  output {
+    File DONEspatial = "DONE"
+  }
+  runtime {
+    docker: docker
+    memory: "128 GB"
+    disks: "local-disk ~{COUNTSSIZE} LOCAL"
+    cpu: "16"
+    preemptible: 0
+  }
+}
+
+
+
+
