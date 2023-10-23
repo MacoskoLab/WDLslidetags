@@ -1,6 +1,6 @@
 version 1.0
 
-import "https://github.com/MacoskoLab/WDLslidetags/blob/main/tasks.wdl" as tasks
+import "https://raw.githubusercontent.com/MacoskoLab/WDLslidetags/main/tasks.wdl" as tasks
 
 workflow tagspipeline {
   String pipeline_version = "1.0.0"
