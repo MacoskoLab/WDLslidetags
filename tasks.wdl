@@ -93,7 +93,7 @@ task mkfastq {
 
     String bucket
     String docker
-    Int MKFASTQSIZE
+    Int SIZE
   }
   command <<<
     
@@ -131,12 +131,12 @@ task mkfastq {
     echo 'END' # set the return code to 0
   >>>
   output {
-    Boolean DONEmkfastq = read_boolean("DONE")
+    Boolean DONE = read_boolean("DONE")
   }
   runtime {
     docker: docker
     memory: "64 GB"
-    disks: "local-disk ~{MKFASTQSIZE} LOCAL"
+    disks: "local-disk ~{SIZE} LOCAL"
     cpu: 8
     preemptible: 0
   }
