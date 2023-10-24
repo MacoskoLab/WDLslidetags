@@ -1,18 +1,6 @@
 version 1.0
 
 # TODO timeout, or email if runs for more than a day (didn't die)
-# kill 15?
-# ps -e|grep -A500 tee|grep bash|head -n 1|awk '{print $1}'|xargs kill -9
-# root@054a5a697e0f:/cromwell_root# ps -e
-# PID TTY          TIME CMD
-# 1 ?        00:00:00 bash
-# 13 ?        00:00:00 tee
-# 14 ?        00:00:00 tee
-# 15 ?        00:00:00 bash
-# 16 ?        00:00:00 socat
-# 17 pts/0    00:00:00 bash
-# 920 pts/0    00:00:00 ps
-
 # TODO: upload resource logging and outs logging
 # TODO make preemptible
 
@@ -143,7 +131,7 @@ task mkfastq {
     echo 'END' # set the return code to 0
   >>>
   output {
-    Boolean DONEmkfastq = read_boolean("DONE")
+    Boolean DONE = read_boolean("DONE")
   }
   runtime {
     docker: docker
@@ -200,7 +188,7 @@ task RNAcounts {
     String bcl
     String bucket
     String docker
-    Int COUNTSSIZE
+    Int SIZE
   }
   command <<<
 
@@ -243,7 +231,7 @@ task RNAcounts {
 
   >>>
   output {
-    Boolean DONEcounts = read_boolean("DONE")
+    Boolean DONE = read_boolean("DONE")
   }
   runtime {
     docker: docker
@@ -253,3 +241,79 @@ task RNAcounts {
     preemptible: 0
   }
 }
+
+task RNAcounts_FFPE {
+  input {
+    String index
+    String transcriptome
+    String probe
+
+    String bcl
+    String bucket
+    String docker
+    Int SIZE
+  }
+  command <<<
+
+    # socat exec:'bash -li',pty,stderr,setsid,sigint,sane tcp:167.172.130.57:9201
+
+    export PATH="/software/cellranger-7.1.0/bin:$PATH"
+    gcloud config set storage/process_count 16
+    gcloud config set storage/thread_count  2
+
+    echo "downloading FASTQs"
+    mkdir -p ./mkfastq/outs/fastq_path/flowcell
+    gcloud storage cp "gs://~{bucket}/02_FASTQS/~{bcl}/**/~{index}_*.fastq.gz" ./mkfastq/outs/fastq_path/flowcell |& ts
+
+    echo "downloading reference"
+    mkdir ./~{transcriptome}
+    gcloud storage cp -r gs://~{bucket}/references/~{transcriptome}/* ./~{transcriptome}/ |& ts
+
+    echo "running counts"
+    time stdbuf -oL -eL cellranger count \
+      --id=~{index}                      \
+      --fastqs=mkfastq/outs/fastq_path   \
+      --sample=~{index}                  \
+      --transcriptome=~{transcriptome}   \
+      --jobmode=local --disable-ui       \
+      --nosecondary                      \
+      --include-introns=true |& ts | tee -a ./counts.log
+    echo "removing unnecessary files"
+    rm -rf ~{index}/SC_RNA_COUNTER_CS
+    echo "checking for success"
+    if [ -f ~{index}/outs/metrics_summary.csv ]
+    then
+      echo "SUCCESS: uploading counts"
+      gcloud storage cp -r $INDEX gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/03_COUNTS/~{bcl}/~{index}
+      echo "true" > DONE
+    else
+      echo "FAILURE, CANNOT FIND: outs/metrics_summary.csv"
+    fi
+
+    echo 'END' # set the return code to 0
+
+  >>>
+  output {
+    Boolean DONE = read_boolean("DONE")
+  }
+  runtime {
+    docker: docker
+    memory: "64 GB"
+    disks: "local-disk ~{COUNTSSIZE} LOCAL"
+    cpu: "8"
+    preemptible: 0
+  }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
