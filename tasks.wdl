@@ -13,27 +13,21 @@ version 1.0
 # 17 pts/0    00:00:00 bash
 # 920 pts/0    00:00:00 ps
 
-# TODO: make the sheet support worksheets other than Tags (read_sheet.py)
-# TODO: other counts types - currently assumes that the input is Tags
 # TODO: upload resource logging and outs logging
-# TODO: better matching, positioning, plots (.jl/.R), joinpath
 # TODO make preemptible
+
+# TODO: better matching, positioning, plots (.jl/.R), joinpath
 # TODO remove unneeded files from the BCL (.tifs?)
 # TODO record reference
-# TODO: check docker size: apt install ncdu; ncdu
-# TODO: add support for commas in the spreadsheet
-# TODO: "_" vs "_S" and/in file size calculation
-
-# real TODOs:
 # umi collapsing / chimerism
 # check if the r worked
-
 
 task read_sheet {
   input {
       String bcl
       Boolean run_mkfastq
-      Boolean run_counts
+      Boolean run_RNAcounts
+      Boolean run_SBcounts
       Boolean run_spatial
 
       String bucket
@@ -43,16 +37,22 @@ task read_sheet {
 
       # socat exec:'bash -li',pty,stderr,setsid,sigint,sane tcp:167.172.130.57:9201    
 
+      echo "true" > DONE
+
       # Indexes.csv, Transcriptomes.csv, Spatial.csv
       gsutil cp gs://~{bucket}/scripts/upload_for_google_key.json .
       gsutil cp gs://~{bucket}/scripts/read_sheet.py .
       python3 read_sheet.py ~{bcl} ~{bucket}
-
-      date > DONE
-
-      # Get the size of the BCL, then make sure 3x size is below 6TB
-      gsutil du -sc gs://~{bucket}/01_BCLS/~{bcl} | grep total | awk '{size=$1/1024/1024/1024 ; size=size*3 ; if (size<127) size=127 ; printf "%d\n", size+1}' > MKFASTQSIZE
-      awk 'NR==1 && $1>6000 { system("echo TOOBIG ; rm DONE") }' MKFASTQSIZE
+      # Checks on the file contents
+      ~{run_mkfastq} && [[ "$(wc -l < Indexes.csv)" -lt 1 ]] && echo "ERROR: Indexes.csv is blank but run_mkfastq is true" && rm DONE
+      ~{run_RNAcounts} && [[ "$(wc -l < RNAcounts.tsv)" -lt 1 ]] && echo "ERROR: RNAcounts.tsv is blank but run_RNAcounts is true" && rm DONE
+      ~{run_SBcounts} && [[ "$(wc -l < SBcounts.tsv)" -lt 1 ]] && echo "ERROR: SBcounts.tsv is blank but run_SBcounts is true" && rm DONE
+      ~{run_spatial} && [[ "$(wc -l < Spatial.tsv)" -lt 1 ]] && echo "ERROR: Spatial.tsv is blank but run_spatial is true" && rm DONE
+      # Empty files if not needed
+      ! ~{run_mkfastq} && echo -n > Indexes.csv
+      ! ~{run_RNAcounts} && echo -n > RNAcounts.tsv
+      ! ~{run_SBcounts} && echo -n > SBcounts.tsv
+      ! ~{run_spatial} && echo -n > Spatial.tsv
 
       # Get the existence of important files
       gsutil ls gs://~{bucket}/01_BCLS/~{bcl} > /dev/null 2>&1
@@ -60,40 +60,34 @@ task read_sheet {
       gsutil ls gs://~{bucket}/02_FASTQS/~{bcl} > /dev/null 2>&1
       exists_mkfastq=$?
       gsutil ls gs://~{bucket}/03_COUNTS/~{bcl} > /dev/null 2>&1
-      exists_counts=$?
-      # Remove files if not needed
-      ! ~{run_counts} && > Transcriptomes.csv
-      ! ~{run_spatial} && > Spatial.csv
+      exists_RNAcounts=$?
+      gsutil ls gs://~{bucket}/04_SPATIAL/~{bcl} > /dev/null 2>&1
+      exists_SBcounts=$?
       # Abort if the files are needed but don't exist
-      ~{run_mkfastq} && [[ $exists_bcl -ne 0 ]] && echo "ERROR: NO BCL" && rm DONE
-      ~{run_counts} && ! ~{run_mkfastq} && [[ $exists_mkfastq -ne 0 ]] && echo "ERROR: NO MKFASTQ" && rm DONE
-      ~{run_spatial} && ! ~{run_mkfastq} && [[ $exists_mkfastq -ne 0 ]] && echo "ERROR: NO MKFASTQ" && rm DONE
-      ~{run_spatial} && ! ~{run_counts} && [[ $exists_counts -ne 0 ]] && echo "ERROR: NO COUNTS" && rm DONE
+      ~{run_mkfastq} && [[ $exists_bcl -ne 0 ]] && echo "ERROR: RUNNING MKFASTQ BUT NO BCL" && rm DONE
+      ~{run_RNAcounts} && ! ~{run_mkfastq} && [[ $exists_mkfastq -ne 0 ]] && echo "ERROR: RUNNING RNACOUNTS BUT NO MKFASTQ" && rm DONE
+      ~{run_SBcounts} && ! ~{run_mkfastq} && [[ $exists_mkfastq -ne 0 ]] && echo "ERROR: RUNNING SBCOUNTS BUT NO MKFASTQ" && rm DONE
+      ~{run_spatial} && ! ~{run_RNAcounts} && [[ $exists_RNAcounts -ne 0 ]] && echo "ERROR: RUNNING SPATIAL BUT NO RNACOUNTS" && rm DONE
+      ~{run_spatial} && ! ~{run_SBcounts} && [[ $exists_SBcounts -ne 0 ]] && echo "ERROR: RUNNING SPATIAL BUT NO SBCOUNTS" && rm DONE
       # Abort if the files will be created but already exist (except spatial, easy to generate so will overwrite)
       ~{run_mkfastq} && [[ $exists_mkfastq -eq 0 ]] && echo "ERROR: MKFASTQ ALREADY DONE" && rm DONE
-      ~{run_counts} && [[ $exists_counts -eq 0 ]] && echo "ERROR: COUNTS ALREADY DONE" && rm DONE
-      # Checks on the file contents
-      ~{run_mkfastq} && [[ "$(wc -l < Indexes.csv)" -lt 2 ]] && echo "ERROR: Indexes.csv is blank but mkfastq is true" && rm DONE
-      ~{run_counts} && [[ "$(wc -l < Transcriptomes.csv)" -lt 1 ]] && echo "ERROR: Transcriptomes.csv is blank but counts is true" && rm DONE
-      ~{run_spatial} && [[ "$(wc -l < Spatial.csv)" -lt 1 ]] && echo "ERROR: Spatial.csv is blank but spatial is true" && rm DONE
+      ~{run_RNAcounts} && [[ $exists_counts -eq 0 ]] && echo "WARNING: COUNTS ALREADY EXISTS, WILL ONLY WRITE NEW LIBRARIES"
 
-      # Get files ready for counts and spatial
-      awk 'BEGIN{a=0} {a++; print a}' Transcriptomes.csv > COUNTSROWS
-      awk 'BEGIN{a=0} {a++; print a}' Spatial.csv > SPATIALROWS
+      # Get the size of the BCL, then make sure 3x size is below 6TB
+      gsutil du -sc gs://~{bucket}/01_BCLS/~{bcl} | grep total | awk '{size=$1/1024/1024/1024 ; size=size*3 ; if (size<127) size=127 ; printf "%d\n", size+1}' > MKFASTQSIZE
+      [[ $(cat MKFASTQSIZE) -gt 6000 ]] && echo "BCL is too large, please increase the size limit in the read_sheet task" && rm DONE
 
       echo 'END' # set the return code to 0
 
     >>>
     output {
-      File Indexes           = "Indexes.csv"
-      File Counts            = "Transcriptomes.csv"
-      File Spatial           = "Spatial.csv"
+      File Indexes                   = "Indexes.csv"
+      Array[Array[String]] RNAcounts = read_tsv("RNAcounts.tsv")
+      Array[Array[String]] SBcounts  = read_tsv("SBcounts.tsv")
+      Array[Array[String]] Spatial   = read_tsv("Spatial.tsv")
 
-      Array[Int] COUNTSROWS  = read_lines("COUNTSROWS")
-      Array[Int] SPATIALROWS = read_lines("SPATIALROWS")
-
-      Int MKFASTQSIZE        = read_int("MKFASTQSIZE")
-      File DONE              = "DONE"
+      Int MKFASTQSIZE                = read_int("MKFASTQSIZE")
+      Boolean DONE                   = read_boolean("DONE")
     }
     runtime {
       docker: docker
@@ -108,7 +102,6 @@ task mkfastq {
   input {
     String bcl
     File Indexes
-    Boolean run_mkfastq
 
     String bucket
     String docker
@@ -118,61 +111,39 @@ task mkfastq {
     
     # socat exec:'bash -li',pty,stderr,setsid,sigint,sane tcp:167.172.130.57:9201
 
-    if ~{run_mkfastq}
+    export PATH="/software/cellranger-7.1.0/bin:$PATH"
+    export PATH="/usr/local/bcl2fastq/bin:$PATH"
+    gcloud config set storage/process_count 16
+    gcloud config set storage/thread_count  2
+
+    echo "downloading BCL"
+    mkdir BCL
+    gcloud storage cp -r gs://~{bucket}/01_BCLS/~{bcl}/* ./BCL |& ts
+
+    echo "running mkfastq"
+    time stdbuf -oL -eL cellranger mkfastq                     \
+      --run=BCL                                                \
+      --id=mkfastq                                             \
+      --csv=~{Indexes}                                         \
+      --disable-ui |& ts | tee ./mkfastq.log
+
+    echo "removing MAKE_FASTQS_CS"
+    rm -rf ./mkfastq/MAKE_FASTQS_CS
+
+    echo "checking for success"
+    if [ -f mkfastq/outs/fastq_path/Reports/html/index.html ]
     then
-      export PATH="/software/cellranger-7.1.0/bin:$PATH"
-      export PATH="/usr/local/bcl2fastq/bin:$PATH"
-      gcloud config set storage/process_count 16
-      gcloud config set storage/thread_count  2
-
-      echo "downloading BCL"
-      mkdir BCL
-      gcloud storage cp -r gs://~{bucket}/01_BCLS/~{bcl}/* BCL |& ts
-
-      echo "running mkfastq" 
-      time stdbuf -oL -eL cellranger mkfastq                     \
-        --run=BCL                                                \
-        --id=mkfastq                                             \
-        --csv=~{Indexes}                                         \
-        --jobmode=local --disable-ui  |& ts | tee ./mkfastq.log
-
-      echo "removing unnecessary files"
-      rm -rf ./mkfastq/MAKE_FASTQS_CS
-
-      echo "checking for success"
-      if [ -f mkfastq/outs/fastq_path/Reports/html/index.html ]
-      then
-        echo "uploading fastqs"
-        gcloud storage cp -r mkfastq gs://~{bucket}/02_FASTQS/~{bcl}
-        date > DONE
-      else
-        echo "FAILURE, CANNOT FIND: index.html"
-      fi
+      echo "success, uploading fastqs"
+      gcloud storage cp -r mkfastq gs://~{bucket}/02_FASTQS/~{bcl}
+      echo "true" > DONE
     else
-      echo "skipping mkfastq"
-      date > DONE
+      echo "FAILURE, CANNOT FIND: index.html"
     fi
-
-    # At this point, assert there are either pipeline-generated fastqs or user-input fastqs
-    [ $(gsutil ls -r gs://~{bucket}/02_FASTQS/~{bcl} | grep -F ".fastq.gz" | grep -v "Undetermined" | wc -l) -eq 0 ] && echo "NOFASTQS" && rm DONE
-
-    # Calculate the amount of disk space to use for counts/spatial
-    gsutil du gs://~{bucket}/02_FASTQS/~{bcl} | grep -F ".fastq.gz" | grep -v "Undetermined" > SIZES
-    Rscript -e "
-      library(dplyr) ; library(purrr)
-      df = read.table('SIZES', header=F, sep='', stringsAsFactors=F)
-      df[[2]] = df[[2]] %>% basename %>% stringr::str_split('_S') %>% map_chr(pluck(1))
-      df %>% group_by(V2) %>% summarise(total=sum(V1)) %>% pull(total) %>% max %>% cat(sep='\n')
-    " | awk '{size=$1/1024/1024/1024 ; size=size*6+20 ; if (size<127) size=127 ; printf "%d\n", size+1}' > COUNTSSIZE
-    
-    # Assert that the disk size is below 1TB
-    awk 'NR==1 && $1>1000 { system("echo TOOBIG ; rm DONE") }' COUNTSSIZE
 
     echo 'END' # set the return code to 0
   >>>
   output {
-    Int COUNTSSIZE  = read_int("COUNTSSIZE")
-    File DONEmkfastq = "DONE"
+    Boolean DONEmkfastq = read_boolean("DONE")
   }
   runtime {
     docker: docker
@@ -183,174 +154,46 @@ task mkfastq {
   }
 }
 
-task counts {
+task compute_sizes {
   input {
-    String bcl
-    File Counts
-    Int rowindex
-    Boolean run_counts
+      Array[Array[String]] array2D
+      String bcl
+      String bucket
+      String docker
+      Boolean DONEmkfastq
+    }
+    command <<<
 
-    String bucket
-    String docker
-    Int COUNTSSIZE
-  }
-  command <<<
+      socat exec:'bash -li',pty,stderr,setsid,sigint,sane tcp:167.172.130.57:9201
 
-    # socat exec:'bash -li',pty,stderr,setsid,sigint,sane tcp:167.172.130.57:9201
+      arrayOfArrays=(~{sep=" " arrayOfArrays})
 
-    if ~{run_counts}
-    then
-      export PATH="/software/cellranger-7.1.0/bin:$PATH"
-      gcloud config set storage/process_count 16
-      gcloud config set storage/thread_count  2
+      echo -n > SIZES
 
-      echo "get the technique, index, and transcriptome from the sheet"
-      line=$(awk -v i="~{rowindex}" -F ',' 'NR == i {print $1 ,$2, $3}' ~{Counts})
-      read TECH INDEX REF <<< "$line"
-      REF=$(echo $REF|tr -d '\r\n')
+      while IFS=$'\t' read -r index rest_of_line
+      do
+        size=$(gsutil du -sce "*_I[0-9]_[0-9][0-9][0-9].fastq.gz" "gs://~{bucket}/02_FASTQS/~{bcl}/outs/fastq_path/*/$index_*_R*.fastq.gz" | grep total | awk '{print $1}')
+        if [ "$size" -ne 0 ]; then
+          echo $size | awk '{$1/1024/1024/1024 ; size=size*6+20 ; if (size<127) size=127 ; printf "%d\n", size+1}' >> SIZES
+        else
+          echo "CANNOT FIND THE FASTQS FOR $index"
+          echo "0" >> SIZES
+        fi
+      done < hi #{array2D}
 
-      echo "downloading FASTQs"
-      mkdir -p ./mkfastq/outs/fastq_path/flowcell
-      gcloud storage cp "gs://~{bucket}/02_FASTQS/~{bcl}/**/$INDEX*.fastq.gz" ./mkfastq/outs/fastq_path/flowcell |& ts
-
-      echo "downloading reference"
-      mkdir ./ref_folder
-      gcloud storage cp -r gs://~{bucket}/references/$REF/* ./ref_folder/ |& ts
-
-      date > DONE
-
-      echo "running counts (with introns)"
-      time stdbuf -oL -eL cellranger count \
-        --id=$INDEX                        \
-        --fastqs=mkfastq/outs/fastq_path   \
-        --sample=$INDEX                    \
-        --transcriptome=ref_folder         \
-        --jobmode=local --disable-ui       \
-        --nosecondary                      \
-        --include-introns=true |& ts | tee -a ./counts.log
-      echo "removing unnecessary files"
-      rm -rf $INDEX/SC_RNA_COUNTER_CS
-      echo "checking for success"
-      if [ -f $INDEX/outs/metrics_summary.csv ]
-      then
-        echo "SUCCESS: uploading counts"
-        gcloud storage cp -r $INDEX gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/03_COUNTS/~{bcl}/$INDEX
-      else
-        echo "FAILURE"
-        rm DONE
-      fi
-
-      rm -rf $INDEX
-
-      echo "running counts (without introns)"
-      time stdbuf -oL -eL cellranger count \
-        --id=$INDEX                        \
-        --fastqs=mkfastq/outs/fastq_path   \
-        --sample=$INDEX                    \
-        --transcriptome=ref_folder         \
-        --jobmode=local --disable-ui       \
-        --nosecondary                      \
-        --include-introns=false |& ts | tee -a ./counts.log
-      echo "removing unnecessary files"
-      rm -rf $INDEX/SC_RNA_COUNTER_CS
-      echo "checking for success"
-      if [ -f $INDEX/outs/metrics_summary.csv ]
-      then
-        echo "SUCCESS: uploading counts"
-        gcloud storage cp -r $INDEX gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/03_COUNTS_NOINTRONS/~{bcl}/$INDEX
-      else
-        echo "FAILURE"
-        rm DONE
-      fi
-
-    else
-      echo "skipping counts"
-      date > DONE
-    fi
-
-    echo 'END' # set the return code to 0
-
-  >>>
+    >>>
   output {
-    File DONEcounts = "DONE"
+    Array[Int] SIZES  = read_lines("SIZES")
   }
   runtime {
     docker: docker
-    memory: "64 GB"
-    disks: "local-disk ~{COUNTSSIZE} LOCAL"
-    cpu: "8"
+    memory: "5 GB"
+    disks: "local-disk 10 HDD"
+    cpu: 1
     preemptible: 0
   }
 }
 
-task spatial {
-  input {
-    String bcl
-    File Spatial
-    Int rowindex
-    Boolean run_spatial
 
-    String bucket
-    String docker
-    Int COUNTSSIZE
-    Array[File] DONEcounts
-  }
-  command <<<
 
-    # socat exec:'bash -li',pty,stderr,setsid,sigint,sane tcp:167.172.130.57:9201
 
-    if ~{run_spatial}
-    then
-      export PATH="/software/julia-1.8.5/bin:$PATH"
-
-      gsutil cp gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/scripts/3M-february-2018.txt .
-      gsutil cp gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/scripts/read_fastq.jl .
-      gsutil cp gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/scripts/spatial.R .
-
-      RNAIND=$(awk -v i="~{rowindex}" -F ',' 'NR == i {print $1}' ~{Spatial} | tr -d '\r\n')
-
-      date > DONE
-
-      julia read_fastq.jl ~{Spatial} ~{rowindex}
-
-      echo "checking for .jl success"
-      if [ -d $RNAIND ]
-      then
-        echo "uploading to 04_SPATIAL"
-        gcloud storage cp -r $RNAIND gs://~{bucket}/04_SPATIAL/~{bcl}/$RNAIND
-      else
-        echo "FAILURE, CANNOT FIND: RNAINDEX/"
-        rm DONE
-      fi
-
-      Rscript spatial.R
-
-      echo "checking for .R success"
-      if [ -f $RNAIND.qs ]
-      then
-        echo "uploading to 05_SEURATS"
-        gcloud storage cp $RNAIND.qs gs://~{bucket}/05_SEURATS/~{bcl}/$RNAIND.qs
-        gcloud storage cp $RNAIND/summary.pdf gs://~{bucket}/04_SPATIAL/~{bcl}/$RNAIND/summary.pdf
-      else
-        echo "FAILURE, CANNOT FIND: RNAINDEX.qs"
-        rm DONE
-      fi
-    else
-      echo "skipping spatial"
-      date > DONE
-    fi
-
-    echo 'END' # set the return code to 0
-
-  >>>
-  output {
-    File DONEspatial = "DONE"
-  }
-  runtime {
-    docker: docker
-    memory: "128 GB"
-    disks: "local-disk ~{COUNTSSIZE} LOCAL"
-    cpu: "16"
-    preemptible: 0
-  }
-}
