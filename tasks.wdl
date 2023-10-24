@@ -93,7 +93,7 @@ task mkfastq {
 
     String bucket
     String docker
-    Int MKFASTQSIZE
+    Int SIZE
   }
   command <<<
     
@@ -136,7 +136,7 @@ task mkfastq {
   runtime {
     docker: docker
     memory: "64 GB"
-    disks: "local-disk ~{MKFASTQSIZE} LOCAL"
+    disks: "local-disk ~{SIZE} LOCAL"
     cpu: 8
     preemptible: 0
   }
@@ -154,22 +154,26 @@ task compute_sizes {
 
       # socat exec:'bash -li',pty,stderr,setsid,sigint,sane tcp:167.172.130.57:9201
 
+      # ensure files are empty before appending
       echo -n > SIZES
+      echo -n > COUNTS.tsv
 
+      # get the size of the fastqs and only run if the fastqs exist
       while IFS=$'\t' read -r index rest_of_line
       do
         size=$(gsutil du -sce "*_I[0-9]_[0-9][0-9][0-9].fastq.gz" "gs://~{bucket}/02_FASTQS/~{bcl}/outs/fastq_path/*/$index_*_R*.fastq.gz" | grep total | awk '{print $1}')
         if [ "$size" -gt 0 ]; then
           echo $size | awk '{$1/1024/1024/1024 ; size=size*6+20 ; if (size<127) size=127 ; printf "%d\n", size+1}' >> SIZES
+          echo -e "$index\t$rest_of_line" >> COUNTS.tsv
         else
-          echo "CANNOT FIND THE FASTQS FOR $index"
-          echo "0" >> SIZES
+          echo "CANNOT FIND THE FASTQS FOR $index, will not run"
         fi
       done < ~{write_tsv(array2D)}
 
     >>>
   output {
     Array[Int] SIZES  = read_lines("SIZES")
+    Array[Array[String]] COUNTS = read_tsv("COUNTS.tsv")
   }
   runtime {
     docker: docker
@@ -215,13 +219,15 @@ task RNAcounts {
       --jobmode=local --disable-ui       \
       --nosecondary                      \
       --include-introns=true |& ts | tee -a ./counts.log
+    
     echo "removing unnecessary files"
     rm -rf ~{index}/SC_RNA_COUNTER_CS
+
     echo "checking for success"
     if [ -f ~{index}/outs/metrics_summary.csv ]
     then
       echo "SUCCESS: uploading counts"
-      gcloud storage cp -r $INDEX gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/03_COUNTS/~{bcl}/~{index}
+      gcloud storage cp -r $INDEX gs://~{bucket}/03_COUNTS/~{bcl}/~{index}
       echo "true" > DONE
     else
       echo "FAILURE, CANNOT FIND: outs/metrics_summary.csv"
@@ -236,7 +242,7 @@ task RNAcounts {
   runtime {
     docker: docker
     memory: "64 GB"
-    disks: "local-disk ~{COUNTSSIZE} LOCAL"
+    disks: "local-disk ~{SIZE} LOCAL"
     cpu: "8"
     preemptible: 0
   }
@@ -246,7 +252,7 @@ task RNAcounts_FFPE {
   input {
     String index
     String transcriptome
-    String probe
+    String probeset
 
     String bcl
     String bucket
@@ -261,33 +267,47 @@ task RNAcounts_FFPE {
     gcloud config set storage/process_count 16
     gcloud config set storage/thread_count  2
 
-    echo "downloading FASTQs"
-    mkdir -p ./mkfastq/outs/fastq_path/flowcell
-    gcloud storage cp "gs://~{bucket}/02_FASTQS/~{bcl}/**/~{index}_*.fastq.gz" ./mkfastq/outs/fastq_path/flowcell |& ts
+    echo "downloading FASTQS"
+    mkdir ./FASTQS
+    gcloud storage cp "gs://~{bucket}/02_FASTQS/~{bcl}/**/~{index}_*.fastq.gz" ./FASTQS/ |& ts
 
     echo "downloading reference"
-    mkdir ./~{transcriptome}
-    gcloud storage cp -r gs://~{bucket}/references/~{transcriptome}/* ./~{transcriptome}/ |& ts
+    mkdir ~{transcriptome}
+    gcloud storage cp -r gs://~{bucket}/references/~{transcriptome}/* ~{transcriptome}/ |& ts
+
+    echo "downloading probeset"
+    gcloud storage cp gs://~{bucket}/probesets/~{probeset} . |& ts
+
+    echo "creating the config file"
+    echo -n > multiconfig.csv
+    echo "[gene-expression]" >> multiconfig.csv
+    echo "reference,$(readlink -f ~{transcriptome})" >> multiconfig.csv
+    echo "probe-set,$(readlink -f ~{probeset})" >> multiconfig.csv
+    echo "no-secondary,true" >> multiconfig.csv
+    echo "no-bam,false" >> multiconfig.csv
+    echo "include-introns,true" >> multiconfig.csv
+    echo "" >> multiconfig.csv
+    echo "[libraries]" >> multiconfig.csv
+    echo "fastq_id,fastqs,feature_types" >> multiconfig.csv
+    echo "~{index},$(readlink -f FASTQS),Gene Expression" >> multiconfig.csv
 
     echo "running counts"
-    time stdbuf -oL -eL cellranger count \
-      --id=~{index}                      \
-      --fastqs=mkfastq/outs/fastq_path   \
-      --sample=~{index}                  \
-      --transcriptome=~{transcriptome}   \
-      --jobmode=local --disable-ui       \
-      --nosecondary                      \
-      --include-introns=true |& ts | tee -a ./counts.log
+    time stdbuf -oL -eL cellranger multi \
+      --id=~{index} \
+      --csv=multiconfig.csv \
+      --jobmode=local --disable-ui |& ts | tee -a ./counts.log
+
     echo "removing unnecessary files"
-    rm -rf ~{index}/SC_RNA_COUNTER_CS
+    rm -rf ~{index}/SC_MULTI_CS
+
     echo "checking for success"
-    if [ -f ~{index}/outs/metrics_summary.csv ]
+    if [ -f ~{index}/outs/per_sample_outs/~{index}/metrics_summary.csv ]
     then
       echo "SUCCESS: uploading counts"
-      gcloud storage cp -r $INDEX gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/03_COUNTS/~{bcl}/~{index}
+      gcloud storage cp -r $INDEX gs://~{bucket}/03_COUNTS/~{bcl}/~{index}
       echo "true" > DONE
     else
-      echo "FAILURE, CANNOT FIND: outs/metrics_summary.csv"
+      echo "FAILURE, CANNOT FIND: ~{index}/outs/per_sample_outs/~{index}/metrics_summary.csv"
     fi
 
     echo 'END' # set the return code to 0
@@ -299,11 +319,15 @@ task RNAcounts_FFPE {
   runtime {
     docker: docker
     memory: "64 GB"
-    disks: "local-disk ~{COUNTSSIZE} LOCAL"
+    disks: "local-disk ~{SIZE} LOCAL"
     cpu: "8"
     preemptible: 0
   }
 }
+
+
+
+
 
 
 
