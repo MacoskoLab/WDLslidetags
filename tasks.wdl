@@ -93,7 +93,7 @@ task mkfastq {
 
     String bucket
     String docker
-    Int SIZE
+    Int MKFASTQSIZE
   }
   command <<<
     
@@ -136,7 +136,7 @@ task mkfastq {
   runtime {
     docker: docker
     memory: "64 GB"
-    disks: "local-disk ~{SIZE} LOCAL"
+    disks: "local-disk ~{MKFASTQSIZE} LOCAL"
     cpu: 8
     preemptible: 0
   }
