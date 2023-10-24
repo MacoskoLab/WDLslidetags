@@ -93,7 +93,7 @@ task mkfastq {
 
     String bucket
     String docker
-    Int SIZE
+    Int MKFASTQSIZE
   }
   command <<<
     
@@ -131,12 +131,12 @@ task mkfastq {
     echo 'END' # set the return code to 0
   >>>
   output {
-    Boolean DONE = read_boolean("DONE")
+    Boolean DONEmkfastq = read_boolean("DONE")
   }
   runtime {
     docker: docker
     memory: "64 GB"
-    disks: "local-disk ~{SIZE} LOCAL"
+    disks: "local-disk ~{MKFASTQSIZE} LOCAL"
     cpu: 8
     preemptible: 0
   }
@@ -324,13 +324,3 @@ task RNAcounts_FFPE {
     preemptible: 0
   }
 }
-
-
-
-
-
-
-
-
-
-
