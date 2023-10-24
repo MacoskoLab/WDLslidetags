@@ -164,11 +164,20 @@ task compute_sizes {
     }
     command <<<
 
-      socat exec:'bash -li',pty,stderr,setsid,sigint,sane tcp:167.172.130.57:9201
+      # socat exec:'bash -li',pty,stderr,setsid,sigint,sane tcp:167.172.130.57:9201
 
-      arrayOfArrays=(~{sep=" " array2D})
+      echo -n > SIZES
 
-
+      while IFS=$'\t' read -r index rest_of_line
+      do
+        size=$(gsutil du -sce "*_I[0-9]_[0-9][0-9][0-9].fastq.gz" "gs://~{bucket}/02_FASTQS/~{bcl}/outs/fastq_path/*/$index_*_R*.fastq.gz" | grep total | awk '{print $1}')
+        if [ "$size" -gt 0 ]; then
+          echo $size | awk '{$1/1024/1024/1024 ; size=size*6+20 ; if (size<127) size=127 ; printf "%d\n", size+1}' >> SIZES
+        else
+          echo "CANNOT FIND THE FASTQS FOR $index"
+          echo "0" >> SIZES
+        fi
+      done < ~{write_tsv(array2D)}
 
     >>>
   output {
@@ -183,6 +192,64 @@ task compute_sizes {
   }
 }
 
+task RNAcounts {
+  input {
+    String index
+    String transcriptome
 
+    String bcl
+    String bucket
+    String docker
+    Int COUNTSSIZE
+  }
+  command <<<
 
+    # socat exec:'bash -li',pty,stderr,setsid,sigint,sane tcp:167.172.130.57:9201
 
+    export PATH="/software/cellranger-7.1.0/bin:$PATH"
+    gcloud config set storage/process_count 16
+    gcloud config set storage/thread_count  2
+
+    echo "downloading FASTQs"
+    mkdir -p ./mkfastq/outs/fastq_path/flowcell
+    gcloud storage cp "gs://~{bucket}/02_FASTQS/~{bcl}/**/~{index}_*.fastq.gz" ./mkfastq/outs/fastq_path/flowcell |& ts
+
+    echo "downloading reference"
+    mkdir ./~{transcriptome}
+    gcloud storage cp -r gs://~{bucket}/references/~{transcriptome}/* ./~{transcriptome}/ |& ts
+
+    echo "running counts"
+    time stdbuf -oL -eL cellranger count \
+      --id=~{index}                      \
+      --fastqs=mkfastq/outs/fastq_path   \
+      --sample=~{index}                  \
+      --transcriptome=~{transcriptome}   \
+      --jobmode=local --disable-ui       \
+      --nosecondary                      \
+      --include-introns=true |& ts | tee -a ./counts.log
+    echo "removing unnecessary files"
+    rm -rf ~{index}/SC_RNA_COUNTER_CS
+    echo "checking for success"
+    if [ -f ~{index}/outs/metrics_summary.csv ]
+    then
+      echo "SUCCESS: uploading counts"
+      gcloud storage cp -r $INDEX gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/03_COUNTS/~{bcl}/~{index}
+      echo "true" > DONE
+    else
+      echo "FAILURE, CANNOT FIND: outs/metrics_summary.csv"
+    fi
+
+    echo 'END' # set the return code to 0
+
+  >>>
+  output {
+    Boolean DONEcounts = read_boolean("DONE")
+  }
+  runtime {
+    docker: docker
+    memory: "64 GB"
+    disks: "local-disk ~{COUNTSSIZE} LOCAL"
+    cpu: "8"
+    preemptible: 0
+  }
+}
