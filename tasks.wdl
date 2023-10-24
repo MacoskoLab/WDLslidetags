@@ -131,7 +131,7 @@ task mkfastq {
     echo 'END' # set the return code to 0
   >>>
   output {
-    Boolean DONE = read_boolean("DONE")
+    Boolean DONEmkfastq = read_boolean("DONE")
   }
   runtime {
     docker: docker
@@ -324,13 +324,6 @@ task RNAcounts_FFPE {
     preemptible: 0
   }
 }
-
-
-
-
-
-
-
 
 
 
