@@ -32,24 +32,61 @@ workflow tagspipeline {
   if (run1_mkfastq) {
     call tasks.mkfastq as mkfastq {
       input:
-        bcl = bcl,
         Indexes = read_sheet.Indexes,
         
+        bcl = bcl,
         bucket = zz_bucket,
         docker = zz_docker,
-        MKFASTQSIZE = read_sheet.MKFASTQSIZE
+        SIZE = read_sheet.MKFASTQSIZE
     }
   }
-  Boolean DONEmkfastq = select_first([mkfastq.DONEmkfastq, true])
+  Boolean DONEmkfastq = select_first([mkfastq.DONE, true])
 
-  call tasks.compute_sizes as RNAsizes {
-    input:
-      array2D = read_sheet.RNAcounts,
-      bcl = bcl,
-      bucket = zz_bucket,
-      docker = zz_docker,
-      DONEmkfastq = DONEmkfastq
+  if (run2_RNAcounts) {
+    call tasks.compute_sizes as compute_RNAsizes {
+      input:
+        array2D = read_sheet.RNAcounts,
+        DONEmkfastq = DONEmkfastq,
+
+        bcl = bcl,
+        bucket = zz_bucket,
+        docker = zz_docker
+    }
   }
+  Array[Int] RNAsizes_arr = select_first([compute_RNAsizes.SIZES, []])
+  Array[Array[String]] RNAcounts_arr = select_first([compute_RNAsizes.COUNTS, []])
+
+  scatter(pair in zip(RNAcounts_arr, RNAsizes_arr)) {
+    Array[String] RNAparams = pair.left
+    Int RNASIZE = pair.right
+    if (length(RNAparams) == 2) {
+      call tasks.RNAcounts as RNAcounts {
+        input:
+          index = RNAparams[0],
+          transcriptome = RNAparams[1],
+
+          bcl = bcl,
+          bucket = zz_bucket,
+          docker = zz_docker,
+          SIZE = RNASIZE
+      }
+    }
+    if (length(RNAparams) == 3) {
+      call tasks.RNAcounts_FFPE as RNAcounts_FFPE {
+        input:
+          index = RNAparams[0],
+          transcriptome = RNAparams[1],
+          probeset = RNAparams[2],
+
+          bcl = bcl,
+          bucket = zz_bucket,
+          docker = zz_docker,
+          SIZE = RNASIZE
+      }
+    }
+  }
+  Array[Boolean] DONERNAcounts = flatten([select_all(RNAcounts.DONE), select_all(RNAcounts_FFPE.DONE)])
+
 
   output {
   }
