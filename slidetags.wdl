@@ -87,7 +87,6 @@ workflow tagspipeline {
   }
   Array[Boolean] DONERNAcounts = flatten([select_all(RNAcounts.DONE), select_all(RNAcounts_FFPE.DONE)])
 
-
   output {
   }
 }
