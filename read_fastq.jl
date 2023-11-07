@@ -1,119 +1,48 @@
 using CSV
-using GZip
-using JSON
+using HDF5
 using FASTX
-using IterTools
+using StatsBase: sample
+using IterTools: product
 using CodecZlib
 using DataFrames
-using Combinatorics
+using StringViews
+using LinearAlgebra: dot
+using Combinatorics: combinations
 
+# Read the command-line arguments
 if length(ARGS) != 2
-    println("Usage: julia readfastq.jl Spatial.csv rowindex")
+    println("Usage: julia readfastq.jl fastqpath puck.csv")
     @assert false
 end
+fastqpath = ARGS[1] ; println("FASTQS path: "*fastqpath)
+puck = ARGS[2] ; println("Puck file: "*puck)
+
+@assert isdir(fastqpath)
+@assert isfile(puck)
 
 ################################################################################
-##### READ THE SHEET ###########################################################
+##### Load the data ############################################################
 ################################################################################
 
-csv = ARGS[1]                  ; println("csv: " * csv) 
-rowindex = parse(Int, ARGS[2]) ; println("rowindex: " * string(rowindex))
+# Load the FASTQ paths
+fastqs = readdir(fastqpath,join=true)
+R1s = filter(s -> occursin("_R1_", s), fastqs) ; println("R1s: ", basename.(R1s))
+R2s = filter(s -> occursin("_R2_", s), fastqs) ; println("R2s: ", basename.(R2s), "\n")
+@assert length(R1s) == length(R2s) > 0
 
-row = CSV.read(csv, DataFrame, header=false)[rowindex, :]
-
-RNAINDEX = row[1]       ; println("RNAINDEX: " * RNAINDEX)
-SBINDEX = row[2]        ; println("SBINDEX: " * SBINDEX)
-GSFASTQS = row[3]       ; println("GSFASTQS: " * GSFASTQS)
-GSPUCK = row[4]         ; println("GSPUCK: " * GSPUCK)
-GSCB = row[5]           ; println("GSCB: " * GSCB)
-GSCBFULL = row[6]       ; println("GSCBFULL: " * GSCBFULL)
-GSINTRON = row[7]       ; println("GSINTRON: " * GSINTRON)
-GSNOINTRON = row[8]     ; println("GSNOINTRON: " * GSNOINTRON)
-
-################################################################################
-##### CONVERT GS PATHS TO LOCAL PATHS ##########################################
-################################################################################
-
-run(`mkdir -p FASTQS`)
-run(`mkdir -p PUCK`)
-run(`mkdir -p CB`)
-run(`mkdir -p CBFULL`)
-run(`mkdir -p INTRON`)
-run(`mkdir -p NOINTRON`)
-
-run(`gcloud storage cp "$GSFASTQS/**/$SBINDEX*_R*.fastq.gz" FASTQS`)
-run(`gcloud storage cp "$GSPUCK" PUCK`)
-run(`gcloud storage cp "$GSCB" CB`)
-run(`gcloud storage cp "$GSCBFULL" CBFULL`)
-run(`gcloud storage cp "$GSINTRON" INTRON`)
-run(`gcloud storage cp "$GSNOINTRON" NOINTRON`)
+# Load the puck.csv
+puckdf = CSV.read(puck, DataFrame, header=false)
+rename!(puckdf, [:sb, :x, :y])
+println("Loaded $puck: $(nrow(puckdf)) spatial barcodes found")
+@assert all(length(s) == 14 for s in puckdf.sb) "Some SB do not have 14bp"
+@assert length(puckdf.sb) == length(Set(puckdf.sb)) "Some SB in the puck are repeated"
 
 ################################################################################
-##### LOAD LOCAL FILES #########################################################
+##### Learn R1 and R2 ##########################################################
 ################################################################################
-
-# Define the paths
-fastqs = readdir("FASTQS",join=true)       ; println(fastqs)
-sbspath = "PUCK/"*basename(GSPUCK)         ; println(sbspath)
-cbspath = "CB/"*basename(GSCB)             ; println(cbspath)
-fullcbspath = "CBFULL/"*basename(GSCBFULL) ; println(fullcbspath)
-cb_dict_path = "3M-february-2018.txt"      ; println(cb_dict_path)
-output_path = RNAINDEX                     ; println(output_path)
-
-# Process and Load
-R1s = filter(s -> occursin("_R1_", s), fastqs) ; println("R1s: ", R1s)
-R2s = filter(s -> occursin("_R2_", s), fastqs) ; println("R2s: ", R2s, "\n")
-@assert length(R1s) == length(R2s)
-
-sbdf = CSV.read(sbspath, DataFrame, header=false)
-rename!(sbdf, [:sb, :x, :y])
-sbs = Set(sbdf.sb)
-println("Loaded $sbspath: $(length(sbs)) sbs found")
-println("First few spatial barcodes: ", collect(sbs)[1:3], "\n")
-@assert all(length(s) == 14 for s in sbs)
-
-function loadCBs(cbspath)
-    # Read file (only .tsv and .tsv.gz are recognized, can add more below)
-    if length(cbspath)>=7 && cbspath[end-6:end]==".tsv.gz"
-        cbs = readlines(GZip.open(cbspath))
-    elseif length(cbspath)>=4 && cbspath[end-3:end]==".tsv"
-        cbs = readlines(cbspath)
-    else
-        error("Unrecognized input file type: $(cbspath)")
-    end
-    println("loaded $(cbspath): $(length(cbs)) cbs found")
-    # Trim off trailing -1
-    if length(cbs[1])==18 && cbs[1][end-1:end]=="-1"
-        println("trimming -1 from cell barcodes")
-        cbs = [s[1:end-2] for s in cbs]
-    end
-    println("first few cell barcodes: ", cbs[1:5], "\n")
-    @assert all(length(s) == 16 for s in cbs)
-    cbs = Set(cbs)
-    return(cbs)
-end
-cbs = loadCBs(cbspath)
-fullcbs = loadCBs(fullcbspath)
-
-dict = CSV.File(cb_dict_path, delim='\t', header=false) |> DataFrame
-rename!(dict, ["GEX", "FEATURE"])
-CB10X = Set(dict.GEX)
-gex2feature = Dict(zip(dict.GEX, dict.FEATURE))
-feature2gex = Dict(zip(dict.FEATURE, dict.GEX))
-
-GGseq = "GGGGGGGGGGGGGGGGGG"
-UPseq = "TCTTCAGCGTTCCCGAGA"
-const GG_HD = 3
-const UP_HD = 3
-
-################################################################################
-##### LEARN REMAP AND R1/R2 ####################################################
-################################################################################
-
-switch = false
-remap = false
 
 # Switch R1 and R2 if needed
+switch = false
 R1len = R1s[1] |> open |> GzipDecompressorStream |> FASTQ.Reader |> first |> FASTQ.sequence |> length
 R2len = R2s[1] |> open |> GzipDecompressorStream |> FASTQ.Reader |> first |> FASTQ.sequence |> length
 if (R1len < 32) & (R2len < 32)
@@ -135,6 +64,7 @@ else
     println("R1: ", s1, " R2: ", s2)
     switch = s2 > s1 ? false : true
 end
+
 if switch == true
     println("Switching R1 and R2")
     temp = R1s
@@ -142,56 +72,19 @@ if switch == true
     R2s = temp
 end
 
-# Remap CB if needed
-if all(x -> x in CB10X, cbs)
-    println("Learning the remap status")
-    cbs1 = Set(cbs) ; cbs2 = Set((k->gex2feature[k]).(cbs))
-    c1 = 0 ; c2 = 0
-    for (i,record) in R1s[1] |> open |> GzipDecompressorStream |> FASTQ.Reader |> enumerate
-        i > 1000000 ? break : nothing
-        global c1 += in(FASTQ.sequence(record)[1:16], cbs1)
-        global c2 += in(FASTQ.sequence(record)[1:16], cbs2)
-    end
-    println("No remap: ", c1, " Remap: ", c2)
-    remap = c1 > c2 ? false : true
-else
-    println("Some CB barcodes are not in the 10X dictionary - skipping remap")
-    remap = false
-end
-if remap == true
-    println("Remapping CB")
-    cbs = Set((k->gex2feature[k]).(cbs))
-    fullcbs = Set((k->gex2feature[k]).(fullcbs))
-else
-    println("Skipping CB remapping")
-end
-
 ################################################################################
-##### PREPARE DICTIONARIES FOR FAST PROCESSING #################################
+##### Create Whitelists ########################################################
 ################################################################################
 
-println("Creating Dictionaries")
+println("Creating matching dictionaries")
 
-@assert isa(cbs, Set)
-@assert isa(fullcbs, Set)
-@assert isa(sbs, Set)
-CBlength = cbs |> first |> length
-SBlength = sbs |> first |> length
-@assert all(x -> length(x) == CBlength, cbs)
-@assert all(x -> length(x) == CBlength, fullcbs)
-@assert all(x -> length(x) == SBlength, sbs)
-
-charlist=['A','C','G','T','N']
+charlist = ['A','C','G','T','N']
 function listHDneighbors(str, hd)
-    @assert occursin(r"^[AGCTN]*$", str)
-    @assert all(char -> isa(char, Char), charlist)
-    @assert 0 <= hd <= length(str)
     res = Set()
     for inds in combinations(1:length(str), hd)
         chars = [str[i] for i in inds]
         pools = [setdiff(charlist, [char]) for char in chars]
         prods = product(pools...)
-        @assert length(prods) == (length(charlist)-1)^hd
         for prod in prods
             s = str
             for (i, c) in zip(inds, prod)
@@ -200,173 +93,267 @@ function listHDneighbors(str, hd)
             push!(res,s)
         end
     end
-    @assert length(res) == length(combinations(1:length(str), hd))*((length(charlist)-1)^hd)
+    return(res)
+end
+function list1delneighbors(str)
+    return([string(str[1:i-1], str[i+1:end]) for i in 1:length(str)])
+end
+function expand_N(s::String15)::Vector{String15}
+    if !occursin('N', s)
+        return [s]
+    end
+    combins = String15[]
+    for nucleotide in ['A','C','G','T']
+        new_str = String15(replace(s, 'N' => nucleotide, count=1))
+        append!(combins, expand_N(new_str))
+    end
+    return combins
+end
+
+# UP matching sets
+UPseq = String31("TCTTCAGCGTTCCCGAGA")
+UPseqHD1 = Set{String31}(listHDneighbors(UPseq, 1))
+UPseqHD2 = Set{String31}(listHDneighbors(UPseq, 2))
+UPseqLD1 = Set{String31}(list1delneighbors(UPseq))
+
+# GG matching set
+GGseq = "GGGGGGGGGGGGGGGGGG"
+GGset = Set{String31}(reduce(union, [listHDneighbors(GGseq,i) for i in 0:3]))
+
+# store exact SB matches
+SBtoindex = Dict{Tuple{String15,String15},Int64}()
+for (i,sb) in enumerate(puckdf.sb)
+    if !occursin('N',sb)
+        SBtoindex[(sb[1:8],sb[9:14])] = i
+    end
+end
+
+# store fuzzy SB matches (==0 is ambiguous, >0 is success, -1 is DNE)
+SBtoindexHD1 = Dict{Tuple{String15,String15},Int64}()
+for (i,sb) in enumerate(puckdf.sb)
+    if !occursin('N',sb)
+        for sb_f in listHDneighbors(sb,1)
+            sbtuple = (sb_f[1:8],sb_f[9:14])
+            get(SBtoindexHD1, sbtuple, i) == i ? SBtoindexHD1[sbtuple] = i : SBtoindexHD1[sbtuple] = 0
+        end
+        sb2 = sb[9:14]
+        for sb1 in list1delneighbors(sb[1:8])
+            sbtuple = (sb1,sb2)
+            get(SBtoindexHD1, sbtuple, i) == i ? SBtoindexHD1[sbtuple] = i : SBtoindexHD1[sbtuple] = 0
+        end
+    elseif count(c -> c == 'N', sb) <= 2
+        for sb_f in expand_N(sb)
+            sbtuple = (sb_f[1:8],sb_f[9:14])
+            get(SBtoindexHD1, sbtuple, i) == i ? SBtoindexHD1[sbtuple] = i : SBtoindexHD1[sbtuple] = 0
+        end
+    else
+        println("Too many N: ",sb)
+    end
+end
+
+################################################################################
+##### Define key functions #####################################################
+################################################################################
+
+bases = ['A','C','T','G']
+
+# CB compressing (between 0x00000000 and 0xffffffff)
+p16 = [convert(UInt32,4^i) for i in 0:15]
+function CBtoindex(CB::StringView{SubArray{UInt8, 1, Vector{UInt8}, Tuple{UnitRange{Int64}}, true}})::UInt32
+    return(dot(p16, (codeunits(CB).>>1).&3))
+end
+function indextoCB(i::UInt32)::String31
+    return(String31(String([bases[(i>>n)&3+1] for n in 0:2:30])))
+end
+
+# UMI compressing (between 0x00000000 and 0x00ffffff)
+p12 = [convert(UInt32,4^i) for i in 0:11]
+function UMItoindex(UMI::StringView{SubArray{UInt8, 1, Vector{UInt8}, Tuple{UnitRange{Int64}}, true}})::UInt32
+    return(dot(p12, (codeunits(UMI).>>1).&3))
+end
+function indextoUMI(i::UInt32)::String15
+    return(String15(String([bases[(i>>n)&3+1] for n in 0:2:22])))
+end
+
+function R2process(r2::StringView{SubArray{UInt8, 1, Vector{UInt8}, Tuple{UnitRange{Int64}}, true}})::Int64
+    if r2[9:26]==UPseq # exact match
+        sb1=r2[1:8]; sb2=r2[27:32]; m["-"]+=1
+    elseif in(r2[9:26],UPseqHD1) # one base flip (might be del at last base - could check cap seq)
+        sb1=r2[1:8]; sb2=r2[27:32]; m["-1X"]+=1
+    elseif in(r2[9:26], GGset) # discard
+        m["GG"]+=1; return(-1)
+    elseif r2[8:25]==UPseq # deletion in sb1, exact match
+        sb1=r2[1:7]; sb2=r2[26:31]; m["1D-"]+=1
+    elseif in(r2[8:25],UPseqHD1) # deletion in sb1, one base flip
+        sb1=r2[1:7]; sb2=r2[26:31]; m["1D-1X"]+=1
+    elseif in(r2[9:25],UPseqLD1) # deletion in UP
+        sb1=r2[1:8]; sb2=r2[26:31]; m["-1D"]+=1
+    elseif in(r2[9:26],UPseqHD2) # two base flips
+        sb1=r2[1:8]; sb2=r2[27:32]; m["-2X"]+=1
+    else # No detectable UP sequence
+        m["none"]+=1; return(-1)
+    end
+
+    key = (sb1, sb2)
+    res = get(SBtoindex, key, -1)
+    if res > 0
+        p["exact"]+=1
+        return(res)
+    end
+    res = get(SBtoindexHD1, key, -1)
+    if res > 0
+        p["HD1"]+=1
+    elseif res == 0
+        p["HD1ambig"]+=1
+    else
+        p["none"]+=1
+    end
     return(res)
 end
 
-function listLD1neighbors(str)
-    # Substitutions
-    res = listHDneighbors(str,1)
-    # Insertions    
-    [[push!(res, string(str[1:i], char, str[i+1:end])) for char in charlist] for i in 0:length(str)]
-    # Deletions
-    [push!(res, string(str[1:i-1], str[i+1:end])) for i in 1:length(str)]
-    return(res)
-end
-
-# Create sets for fast lookup
-GGset = reduce(union, [listHDneighbors(GGseq,i) for i in 0:GG_HD])
-UPset = reduce(union, [listHDneighbors(UPseq,i) for i in 0:UP_HD])
-UPset = union(UPset, listLD1neighbors(UPseq))
-
-CB1dict = Dict()
-[[push!(get!(CB1dict,cb_fuzzy,Set()), cb) for cb_fuzzy in listHDneighbors(cb,1)] for cb in cbs]
-CB1set = Set(keys(CB1dict))
-
-SB1dict = Dict()
-[[push!(get!(SB1dict,sb_fuzzy,Set()), sb) for sb_fuzzy in listLD1neighbors(sb)] for sb in sbs]
-SB1set = Set(keys(SB1dict))
-
 ################################################################################
-##### PROCESS THE FASTQS #######################################################
+##### Read the FASTQS ##########################################################
 ################################################################################
 
-println("Reading FASTQs")
+println("Reading FASTQS")
 
-function CBprocess(cb)
-    if in(cb,cbs)
-        cbmatchtype = "exact"
-    elseif in(cb,CB1set)
-        matches = CB1dict[cb]
-        cbmatchtype = (length(matches) == 1) ? "fuzzy" : "fuzzy.many"
-        cb = first(matches)
-    elseif in(cb,fullcbs)
-        cbmatchtype = "uncalled"
-    else
-        cbmatchtype = "none"
-        # CBnone[cb] = get(CBnone,cb,0) + 1
-    end
-    return cb, cbmatchtype
-end
-
-function UPprocess(r2)
-    up = r2[9:26]; sb = r2[[1:8; 27:32]]
-    if in(up, GGset) # all G
-        upmatchtype = "allG"
-    elseif up == UPseq # exact match
-        upmatchtype = "exact"
-    elseif in(up,UPset)
-        upmatchtype = "fuzzy"
-    elseif in(r2[8:25],UPset) # deletion before
-        upmatchtype = "fuzzy"
-        sb = r2[[1:7; 26:31]]
-    elseif in(r2[9:25],UPset) # deletion inside
-        upmatchtype = "fuzzy"
-        sb = r2[[1:8; 26:31]]
-    else
-        upmatchtype = "none"
-        # UPnone[up] = get(UPnone,up,0) + 1
-    end
-    return sb, upmatchtype
-end
-
-function SBprocess(sb)
-    if in(sb,sbs)
-        sbmatchtype = "exact"
-    elseif in(sb,SB1set)
-        matches = SB1dict[sb]
-        sbmatchtype = (length(matches) == 1) ? "fuzzy" : "fuzzy.many"
-        sb = first(matches)
-    else
-        sbmatchtype = "none"
-        # SBnone[sb] = get(SBnone,sb,0) + 1
-    end
-    return sb, sbmatchtype
-end
-
-mat = Dict()
-metrics = Dict(cbmatchtype=>Dict(upmatchtype=>Dict("exact"=>0,"fuzzy"=>0,"fuzzy.many"=>0,"none"=>0,"noUP"=>0) for upmatchtype in ["exact","fuzzy","allG","none"]) for cbmatchtype in ["exact","fuzzy","fuzzy.many","uncalled","none"])
-# CBnone = Dict() ; UPnone = Dict() ; SBnone = Dict()
 reads = 0
-
+m = Dict("-"=>0,"-1X"=>0,"GG"=>0,"1D-"=>0,"1D-1X"=>0,"-1D"=>0,"-2X"=>0,"none"=>0,"R1lowQ"=>0)
+p = Dict("exact"=>0,"HD1"=>0,"HD1ambig"=>0,"none"=>0)
+mat = Dict{Tuple{UInt32, UInt32, Int64},Int64}()
 for fastqpair in zip(R1s,R2s)
     it1 = fastqpair[1] |> open |> GzipDecompressorStream |> FASTQ.Reader;
     it2 = fastqpair[2] |> open |> GzipDecompressorStream |> FASTQ.Reader;
 
     for record in zip(it1, it2)
-        r1 = record[1] |> FASTQ.sequence
-        r2 = record[2] |> FASTQ.sequence
+        r1 = FASTQ.sequence(record[1])
+        r2 = FASTQ.sequence(record[2], 1:32)
         global reads += 1
 
-        cb, cbmatchtype = CBprocess(r1[1:16])
-        sb, upmatchtype = UPprocess(r2)
-        sb, sbmatchtype = in(upmatchtype,["exact","fuzzy"]) ? SBprocess(sb) : (sb,"noUP")
+        occursin('N', r1) ? (m["R1lowQ"] += 1 ; continue) : nothing
         
-        metrics[cbmatchtype][upmatchtype][sbmatchtype] += 1
+        sb_i = R2process(r2)
+        sb_i>0 ? nothing : continue
+        
+        cb_i = CBtoindex(r1[1:16])
+        umi_i = UMItoindex(r1[17:28])
 
-        umi = r1[17:28]
-        if in(cbmatchtype,["exact","fuzzy"]) & in(sbmatchtype,["exact","fuzzy"])
-            if haskey(mat, (cb,sb))
-                mat[(cb,sb)][umi] = get(mat[(cb,sb)],umi,0) + 1
-            else
-                mat[(cb,sb)] = Dict(umi => 1)
-            end
-        end
+        key = (cb_i,umi_i,sb_i)
+        mat[key] = get(mat,key,0) + 1
     end
 end
 
-println(reads)
-println(metrics)
+@assert reads == sum(values(m))
+@assert m["1D-"]+m["1D-1X"]+m["-"]+m["-1X"]+m["-1D"]+m["-2X"] == sum(values(p))
+@assert p["exact"]+p["HD1"] == sum(values(mat))
 
-vals = []
-[[[[push!(vals,val)] for val in values(d2)] for d2 in values(d1)] for d1 in values(metrics)];
-@assert sum(vals) == reads
-
-################################################################################
-##### SAVE OUTPUT ##############################################################
-################################################################################
-
-# Create a dataframe
-cb_vec = String[]
-sb_vec = String[]
-umi_vec = Int[]
-reads_vec = Int[]
-for (key, dict) in mat
-    push!(cb_vec, key[1])
-    push!(sb_vec, key[2])
-    push!(umi_vec, dict|>keys|>length)
-    push!(reads_vec, dict|>values|>sum)
+# Turn matrix into dataframe
+cblist = UInt32[]
+umilist = UInt32[]
+sblist = Int64[]
+readslist = Int64[]
+for ((cb, umi, sb), r) in mat
+    push!(cblist, cb)
+    push!(umilist, umi)
+    push!(sblist, sb)
+    push!(readslist, r)
 end
-df = DataFrame(cb = cb_vec, sb = sb_vec, umi = umi_vec, reads = reads_vec)
-df = leftjoin(df, sbdf, on=:sb)
-sort!(df, :umi, rev=true)
-remap ? transform!(df, :cb => (x -> (k->feature2gex[k]).(x)) => :cb) : nothing
+empty!(mat)
+GC.gc()
 
-# Save the outout
-run(`mkdir -p $output_path`)
-CSV.write(joinpath(output_path,"coords.csv"), df)
-open(joinpath(output_path,"metrics.json"), "w") do f write(f, JSON.json(metrics)) end
-params = [("RNA index",RNAINDEX),
-          ("SB index",SBINDEX),
-          ("CB path",GSCB),
-          ("CBfull path",GSCBFULL),
-          ("SB path",GSPUCK),
-          ("CB num",length(cbs)),
-          ("full CB num",length(fullcbs)),
-          ("SB num",length(sbs)),
-          ("switch",switch),
-          ("remap",remap),
-          ("reads",reads),
-          ("fastqs",fastqs)]
-params = DataFrame(col1 = [x[1] for x in params], col2 = [x[2] for x in params])
-CSV.write(joinpath(output_path,"params.csv"), params, header = false)
+df = DataFrame(cb = cblist, umi = umilist, sb = sblist, reads = readslist)
 
-# @assert isfile("coords.csv")
-# @assert isfile("metrics.json")
-# @assert isfile("params.csv")
-# @assert isdir("INTRON")
-# @assert isdir("NOINTRON")
+################################################################################
+##### Process the results ######################################################
+################################################################################
 
-#sort(DataFrame(CB=collect(keys(CBnone)),count=collect(values(CBnone))), :count, rev=true)
-#sort(DataFrame(UP=collect(keys(UPnone)),count=collect(values(UPnone))), :count, rev=true)
-#sort(DataFrame(SB=collect(keys(SBnone)),count=collect(values(SBnone))), :count, rev=true)
+# Remove chimeras
+chimera_stats = Dict{String,Int64}()
+chimera_stats["reads_before"]=sum(df.reads) ; chimera_stats["umis_before"]=nrow(df)
+df = groupby(df, [:cb, :umi])
+df = transform(df, :reads => (x -> x.==maximum(x)) => :ismax, ungroup=false)
+df = transform(df, :ismax => (x -> sum(x)>1) => :toptie, ungroup=true)
+df = filter(row -> row.ismax == true && row.toptie == false, df)
+df = select(df, :cb, :umi, :sb, :reads)
+chimera_stats["reads_after"]=sum(df.reads) ; chimera_stats["umis_after"]=nrow(df)
+
+# Rename cell barcodes from 2-bit encoding to cb_list index
+cbi_list = unique(df.cb) ; cb_dict = Dict{UInt32,Int64}(e=>i for (i,e) in enumerate(cbi_list))
+cb_list = Vector{String31}([indextoCB(cbi) for cbi in cbi_list])
+transform!(df, :cb => (x->[cb_dict[y] for y in x]) => :cb)
+sort!(df, :reads, rev=true)
+
+# Convert to 32-bit integers (R doesn't use 64-bit integers)
+@assert maximum(df.cb) < 2^32-1
+@assert maximum(df.sb) < 2^32-1
+@assert maximum(df.reads) < 2^32-1
+df.cb = convert.(Int32, df.cb)
+df.sb = convert.(Int32, df.sb)
+df.reads = convert.(Int32, df.reads)
+
+# Create a downsampling curve
+nreads = sum(df.reads)
+reads_cumsum = vcat([repeat([i], df.reads[i]) for i in 1:nrow(df)]...)
+downsampling = [length(Set([reads_cumsum[i] for i in sample(1:nreads, Int64(round(nreads*p)), replace=false)])) for p in 0:0.05:1]
+
+################################################################################
+##### Save results #############################################################
+################################################################################
+
+h5open("SBcounts.h5", "w") do file
+    create_group(file, "lists")
+    file["lists/cb_list", compress=9] = cb_list
+    file["lists/sb_list", compress=9] = puckdf.sb
+    file["lists/x_list", compress=9] = puckdf.x
+    file["lists/y_list", compress=9] = puckdf.y
+    
+    create_group(file, "matrix")
+    file["matrix/cb_index", compress=9] = df.cb
+    file["matrix/umi", compress=9] = df.umi
+    file["matrix/sb_index", compress=9] = df.sb
+    file["matrix/reads", compress=9] = df.reads
+
+    create_group(file, "metadata")
+    
+    file["metadata/R1s"] = R1s
+    file["metadata/R2s"] = R2s
+    file["metadata/switch"] = convert(Int8, switch)
+    file["metadata/puck"] = puck
+    file["metadata/num_reads"] = reads
+
+    create_group(file, "metadata/UP_matching")
+    file["metadata/UP_matching/type"] = keys(m) |> collect
+    file["metadata/UP_matching/count"] = values(m) |> collect
+
+    create_group(file, "metadata/SB_matching")
+    file["metadata/SB_matching/type"] = keys(p) |> collect
+    file["metadata/SB_matching/count"] = values(p) |> collect
+
+    create_group(file, "metadata/chimera_stats")
+    file["metadata/chimera_stats/type"] = keys(chimera_stats) |> collect
+    file["metadata/chimera_stats/count"] = values(chimera_stats) |> collect
+    
+    file["metadata/downsampling"] = downsampling
+end;
+
+################################################################################
+##### Documentation ############################################################
+################################################################################
+
+# The workflow for processing the FASTQs is as follows:
+#   1) throw out reads that have an N in read 1, which contains the cb and umi (shouldn't be very many cases)
+#   2) throw out reads that don't have a detectable UP site
+#      - UP site does fuzzy matching - allows 1 deletion or up to 2 mismatches
+#      - this is implemented by a few Set() objects made in advance that contain all possible fuzzy matches
+#   3) throw out reads whose spatial barcode (sb) doesn't match the puck whitelist
+#      - allow fuzzy matching with either 1 mismatch or 1 deletion
+#   4) barcode sequence conversions
+#      - it is too expensive to store the full barcode sequences as keys in the dictionary
+#      - spatial barcodes will be stored as the index in the sb column of the puck .csv file
+#      - the cell barcode (cb) and umi will be 2-bit encoded, then the cb will be turned into an index as well
+#   5) dictionary update
+#      - for reads that made it this far, the (cb,umi,sb) key of the dictionary will be incremented by 1
+# The final result of the FASTQ reading step is a dictionary, where the keys are encoded (CB, UMI, SB) and the values are the number of reads
+#   6) convert the dictionary to a dataframe
+#   7) remove chimeras - each (cb,umi) should have a unique sb
+# IMPORTANT NOTE: the output cell barcodes will likely need to be remapped using 3M-february-2018.txt
