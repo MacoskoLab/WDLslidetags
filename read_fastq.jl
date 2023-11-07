@@ -349,7 +349,7 @@ end;
 #      - allow fuzzy matching with either 1 mismatch or 1 deletion
 #   4) barcode sequence conversions
 #      - it is too expensive to store the full barcode sequences as keys in the dictionary
-#      - spatial barcodes will be stored as the index in the sb column of the puck .csv file
+#      - spatial barcodes (sb) will be stored as the index in the sb column of the puck .csv file
 #      - the cell barcode (cb) and umi will be 2-bit encoded, then the cb will be turned into an index as well
 #   5) dictionary update
 #      - for reads that made it this far, the (cb,umi,sb) key of the dictionary will be incremented by 1
