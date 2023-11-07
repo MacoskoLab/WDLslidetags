@@ -171,17 +171,17 @@ assert all(val==None or ('\t' not in val) for val in allvals), "ERROR: Remove al
 assert all(val==None or (' ' not in val) for val in allvals), "ERROR: Remove all spaces from input"
 
 # Refuse to run RNAcounts on indexes that already have an output folder
-# for i,ind in enumerate(RNAindexes):
-#     if checkgsfile(f"gs://{bucket}/03_COUNTS/{bcl}/{ind}"):
-#         print(f"{ind} already exists, skipping RNAcounts")
-#         RNAindexes[i] = "X"
+for i,ind in enumerate(RNAindexes):
+    if checkgsfile(f"gs://{bucket}/03_COUNTS/{bcl}/{ind}"):
+        print(f"{ind} already exists, skipping RNAcounts for this index")
+        RNAindexes[i] = "X"
 
 #### Create Files ##############################################################
 
 runmkfastq = isinstance(RNAindexes,list) and isinstance(SBindexes,list) and isinstance(lanes,int)
 runRNAcounts = isinstance(RNAindexes,list) and isinstance(transcriptomes,list) and (True if RNAtech!="FFPE" else isinstance(probes,list))
-runSBcounts = isinstance(SBindexes,list)
-runspatial = (demultiplex=="NO") and isinstance(RNAindexes, list) and isinstance(pucks, list) and (len(RNAindexes) == len(pucks))
+runSBcounts = (demultiplex=="NO") and isinstance(SBindexes,list) and isinstance(pucks, list) and (len(SBindexes) == len(pucks))
+runspatial = (demultiplex=="NO") and isinstance(RNAindexes, list)
 
 # Write the Indexes.csv file
 if runmkfastq:
@@ -218,7 +218,7 @@ if runSBcounts:
     print("Writing SBcounts.tsv...")
     with open("SBcounts.tsv", mode='w', newline='') as file:
         writer = csv.writer(file, delimiter='\t')
-        for ind in SBindexes:
+        for ind,puck in zip(SBindexes,pucks):
             if ind not in empty:
                 writer.writerow([ind])
     print(f"Done ({sum(1 for line in open('SBcounts.tsv'))} lines written)")
