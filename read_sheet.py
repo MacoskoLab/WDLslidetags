@@ -56,13 +56,11 @@ socket.getaddrinfo = custom_getaddrinfo
 #### Open Sheet ################################################################
 
 # Get the input BCL
-bcl = sys.argv[1]
-print(f"BCL: {bcl}")
-bucket = sys.argv[2]
-print(f"Bucket: {bucket}")
+bcl = sys.argv[1].replace("/", "").replace("\\", "") ; print(f"BCL: {bcl}")
+bucket = sys.argv[2].replace("/", "").replace("\\", "") ; print(f"Bucket: {bucket}")
 assert checkgsfile(f"gs://{bucket}"), f"ERROR: the path gs://{bucket} could not be accessed"
-bclexists = checkgsfile(f"gs://{bucket}/01_BCLS/{bcl}")
-print(f"BCL exists: {bclexists}")
+
+print(f"BCL exists:   {checkgsfile(f'gs://{bucket}/01_BCLS/{bcl}')}")
 print(f"FASTQS exist: {checkgsfile(f'gs://{bucket}/02_FASTQS/{bcl}')}")
 print(f"COUNTS exist: {checkgsfile(f'gs://{bucket}/03_COUNTS/{bcl}')}")
 
@@ -70,7 +68,7 @@ print(f"COUNTS exist: {checkgsfile(f'gs://{bucket}/03_COUNTS/{bcl}')}")
 gspread_client = gspread.service_account(filename="upload_for_google_key.json")
 spreadsheet = gspread_client.open("Slide-Tags Experiment Log")
 
-# Get the RNA technique
+# Search for the BCL in the spreadsheet
 RNAtech = None
 for tech in ["Tags", "FFPE"]:
     sheet = spreadsheet.worksheet(tech)
@@ -109,11 +107,10 @@ else:
 transcriptomes = sheet.cell(row, sheet.find("Transcriptome").col).value
 if transcriptomes != None:
     transcriptomes = transcriptomes.split('\n')
-    print(f"Transcriptomes (input): {transcriptomes}")
     if len(transcriptomes) == 1:
         transcriptomes *= len(RNAindexes)
     print(f"Transcriptomes: {transcriptomes}")
-    assert len(transcriptomes) == len(RNAindexes) > 0, "Number of transcriptomes does not match the number of RNA indexes"
+    assert len(transcriptomes) == len(RNAindexes) > 0, "Number of transcriptomes does not match the number of RNA indexes, add X for blank"
     assert all(checkgsfile(f'gs://{bucket}/references/{ref}') for ref in transcriptomes if ref not in empty), "Not all transcriptomes exist in the bucket"
 else:
     print("No transcriptomes found")
@@ -123,7 +120,6 @@ if RNAtech == "FFPE":
     probes = sheet.cell(row, sheet.find("Probe set").col).value
     if probes != None:
         probes = probes.split('\n')
-        print(f"Probe sets (input): {probes}")
         if len(probes) == 1:
             probes *= len(RNAindexes)
         print(f"Probe sets: {probes}")
@@ -134,70 +130,90 @@ if RNAtech == "FFPE":
 else:
     probes = None
 
-# Get the number of lanes
-lanes = sheet.cell(row, sheet.find("Lanes").col).value
-if bclexists and lanes!=None:
-    lanes = int(lanes)
-    bash = f"gsutil ls gs://{bucket}/01_BCLS/{bcl}/Data/Intensities/BaseCalls | egrep '/L[0-9][0-9][0-9]/$'"
-    bcllanes = subprocess.check_output(bash, shell=True).decode('utf8').strip().split('\n')
-    assert lanes == len(bcllanes) > 0, "ERROR: spreadsheet lanes did not match BCL lanes"
-    print(f"Lanes: {lanes} identified")
+# Get the number of lanes - could skip spreadsheet and just pull from BCL if wanted
+if checkgsfile(f"gs://{bucket}/01_BCLS/{bcl}"):
+    lanes = sheet.cell(row, sheet.find("Lanes").col).value
+    if lanes!=None and lanes.isdigit():
+        lanes = int(lanes)
+        bash = f"gsutil ls gs://{bucket}/01_BCLS/{bcl}/Data/Intensities/BaseCalls | egrep '/L[0-9][0-9][0-9]/$'"
+        bcllanes = subprocess.check_output(bash, shell=True).decode('utf8').strip().split('\n') # if this step fails then no lanes in the BCL were found matching the pattern
+        assert lanes == len(bcllanes), f"ERROR: spreadsheet lanes ({lanes}) did not match BCL lanes ({len(bcllanes)})"
+        print(f"Lanes: {lanes} identified")
+        lanes = None if lanes==0 else lanes
+    else:
+        print(f"No valid spreadsheet lanes found (input: {lanes})")
+        lanes = None
 else:
-    print("Skipping lanes calculation")
+    print("No BCL found, skipping lane calculation")
+    lanes = None
 
-# Get the pucks
+# Get the pucks as a list of lists
 pucks = sheet.cell(row, sheet.find("Puck ID").col).value
 if pucks!=None:
-    pucks = pucks.split('\n')
+    pucks = [[puck.strip() for puck in pucklist.split(",")] for pucklist in pucks.split('\n')]
+    pucks = [[f"{puck}.csv" if (puck[-4:]!=".csv") else puck for puck in pucklist if puck not in empty] for pucklist in pucks]
+    assert len(pucks) == len(SBindexes), f"Number of pucks ({len(pucks)}) does not match the number of SB indexes ({len(SBindexes)}), add X for blank"
+    # assert all( for pucklist in pucks for puck in pucklist if puck not in empty), "ERROR: Not all pucks exist in the bucket"
+    for puck in [puck for pucklist in pucks for puck in pucklist]:
+        if not checkgsfile(f'gs://{bucket}/pucks/{puck}'):
+            assert False, f"Puck {puck} does not exist in the bucket, aborting..."
     print(f"Pucks: {pucks}")
-    pucks = [puck if (puck[-4:]==".csv" or puck in empty) else f"{puck}.csv" for puck in pucks]
-    print(f"Pucks: {pucks}")
-    assert all(checkgsfile(f'gs://{bucket}/pucks/{puck}') for puck in pucks if puck not in empty)
-    print("All pucks exist in the bucket")
 else:
+    pucks = []
     print("No pucks found")
 
 # Get the demultiplex status
 demultiplex = sheet.cell(row, sheet.find("Demultiplex").col).value
 assert demultiplex in ["YES","NO"]
+if demultiplex == "NO":
+    assert len(RNAindexes) == len(SBindexes), "Demultiplex==NO, but the number of SBindexes and RNAindexes differs"
+    assert all(len(pucklist)<=1 for pucklist in pucks), "Demultiplex==NO, but one SB index has multiple pucks"
 print(f"Demultiplex: {demultiplex}")
 
 # Assert no commas, tabs, or spaces in any of the strings
-allvals = [RNAindexes, SBindexes, transcriptomes, probes, pucks]
+allvals = [RNAindexes, SBindexes, transcriptomes, probes, *pucks]
 allvals = [l if isinstance(l,list) else [l] for l in allvals]
 allvals = [item for sublist in allvals for item in sublist]
 assert all(val==None or (',' not in val) for val in allvals), "ERROR: Remove all commas from input"
 assert all(val==None or ('\t' not in val) for val in allvals), "ERROR: Remove all tabs from input"
 assert all(val==None or (' ' not in val) for val in allvals), "ERROR: Remove all spaces from input"
 
+# Refuse to run mkfastq if mkfastq output already exists
+if checkgsfile(f"gs://{bucket}/02_FASTQS/{bcl}"):
+    print(f"mkfastq output for {bcl} already exists, will not run mkfastq")
+    lanes = None
+
 # Refuse to run RNAcounts on indexes that already have an output folder
-for i,ind in enumerate(RNAindexes):
-    if checkgsfile(f"gs://{bucket}/03_COUNTS/{bcl}/{ind}"):
-        print(f"{ind} already exists, skipping RNAcounts for this index")
-        RNAindexes[i] = "X"
+if isinstance(RNAindexes,list):
+    for i,ind in enumerate(RNAindexes):
+        if checkgsfile(f"gs://{bucket}/03_COUNTS/{bcl}/{ind}"):
+            print(f"{ind} already exists, skipping RNAcounts for this index")
+            RNAindexes[i] = "X"
 
 #### Create Files ##############################################################
 
-runmkfastq = isinstance(RNAindexes,list) and isinstance(SBindexes,list) and isinstance(lanes,int)
-runRNAcounts = isinstance(RNAindexes,list) and isinstance(transcriptomes,list) and (True if RNAtech!="FFPE" else isinstance(probes,list))
-runSBcounts = (demultiplex=="NO") and isinstance(SBindexes,list) and isinstance(pucks, list) and (len(SBindexes) == len(pucks))
-runspatial = (demultiplex=="NO") and isinstance(RNAindexes, list)
+run_mkfastq = (isinstance(RNAindexes,list) or isinstance(SBindexes,list)) and isinstance(lanes,int)
+run_RNAcounts = isinstance(RNAindexes,list) and isinstance(transcriptomes,list) and (isinstance(probes,list) if RNAtech=="FFPE" else True)
+run_SBcounts = isinstance(SBindexes,list) and isinstance(pucks, list)
+run_make_seurat = demultiplex=="NO" and isinstance(RNAindexes, list) and isinstance(SBindexes, list)
 
 # Write the Indexes.csv file
-if runmkfastq:
+if run_mkfastq:
     print("Writing Indexes.csv...")
     with open("Indexes.csv", mode='w', newline='') as file:
         writer = csv.writer(file)
         writer.writerow(['Lane', 'Sample', 'Index'])
-        [[writer.writerow([i+1, ind, ind]) for i in range(lanes)] for ind in RNAindexes if ind not in empty]
-        [[writer.writerow([i+1, ind, ind]) for i in range(lanes)] for ind in SBindexes if ind not in empty]
+        if isinstance(RNAindexes,list):
+            [[writer.writerow([i+1, ind, ind]) for i in range(lanes)] for ind in RNAindexes if ind not in empty]
+        if isinstance(SBindexes,list):
+            [[writer.writerow([i+1, ind, ind]) for i in range(lanes)] for ind in SBindexes if ind not in empty]
     print(f"Done ({sum(1 for line in open('Indexes.csv'))} lines written)")
 else:
     print(f"Not enough information to create Indexes.csv, writing a blank file...")
     open("Indexes.csv", 'w').close()
 
 # Write the RNAcounts.tsv file
-if runRNAcounts:
+if run_RNAcounts:
     print("Writing RNAcounts.tsv...")
     probes = probes if probes!=None else ["X"]*len(RNAindexes)
     with open("RNAcounts.tsv", mode='w', newline='') as file:
@@ -214,27 +230,49 @@ else:
     open("RNAcounts.tsv", 'w').close()
 
 # Write the SBcounts.tsv file
-if runSBcounts:
+if run_SBcounts:
     print("Writing SBcounts.tsv...")
     with open("SBcounts.tsv", mode='w', newline='') as file:
         writer = csv.writer(file, delimiter='\t')
-        for ind,puck in zip(SBindexes,pucks):
-            if ind not in empty:
-                writer.writerow([ind])
+        for ind,pucklist in zip(SBindexes,pucks):
+            if ind not in empty and len(pucklist)>0:
+                writer.writerow([ind, *pucklist])
     print(f"Done ({sum(1 for line in open('SBcounts.tsv'))} lines written)")
 else:
     print(f"Not enough information to create SBcounts.tsv, writing a blank file...")
     open("SBcounts.tsv", 'w').close()
 
-# Write the Spatial.tsv
-if runspatial:
-    print("Writing Spatial.tsv...")
-    with open("Spatial.tsv", mode='w', newline='') as file:
+# Write the make_seurat.tsv
+if run_make_seurat:
+    print("Writing Seurat.tsv...")
+    with open("Seurat.tsv", mode='w', newline='') as file:
         writer = csv.writer(file, delimiter='\t')
-        [writer.writerow([ind, puck]) for ind,puck in zip(RNAindexes, pucks) if ind not in empty and puck not in empty]
-    print(f"Done ({sum(1 for line in open('Spatial.tsv'))} lines written)")
+        for RNAind,SBind in zip(RNAindexes, SBindexes):
+            if RNAind not in empty and SBind not in empty:
+                writer.writerow([f"gs://{bucket}/03_COUNTS/{bcl}/{RNAind}", f"gs://{bucket}/04_SPATIAL/{bcl}/{SBind}"])
+    print(f"Done ({sum(1 for line in open('Seurat.tsv'))} lines written)")
 else:
-    print(f"Not enough information to create Spatial.tsv, writing a blank file...")
-    open("Spatial.tsv", 'w').close()
+    print(f"Not enough information to create Seurat.tsv, writing a blank file...")
+    open("Seurat.tsv", 'w').close()
 
 print("-----COMPLETED READ_SHEET.PY-----")
+
+
+### DOCUMENTATION
+# This script reads the spreadsheet, validating the input and writing files needed for downstream tasks
+# See the workflow README for information on the input/output for these tasks
+
+### ASSERTIONS
+# the bucket must exist and be accessible
+# 'upload_for_google_key.json' is required to access the spreadsheet
+# The BCL must appear uniquely in the BCL column across all spreadsheets
+# Number of transcriptomes must match the number of RNA indexes (add X for blank rows)
+#     exception: if only one transcriptome is provided, it is assumed to apply to all indexes
+#     also, all transcriptomes must exist in the bucket
+# Same thing for the probes if doing FFPE
+# Number of lanes in the sheet must match the number of lanes in the BCL Data/Intensities/BaseCalls (if provided)
+# If pucks are provided, they must exist in the bucket and have the same length as SBindexes
+# Demultiplex must be "YES" or "NO"
+#   if NO, then #RNAindexes == #SBindexes and each has one puck (empty values allowed)
+# No commas, tabs, or spaces allowed in RNAindexes, SBindexes, transcriptomes, probes, or pucks
+#   exception is that commas are allowed in pucks
