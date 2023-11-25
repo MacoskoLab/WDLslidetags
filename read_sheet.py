@@ -236,7 +236,7 @@ if run_SBcounts:
         writer = csv.writer(file, delimiter='\t')
         for ind,pucklist in zip(SBindexes,pucks):
             if ind not in empty and len(pucklist)>0:
-                writer.writerow([ind, *pucklist])
+                writer.writerow([ind, ",".join(pucklist)])
     print(f"Done ({sum(1 for line in open('SBcounts.tsv'))} lines written)")
 else:
     print(f"Not enough information to create SBcounts.tsv, writing a blank file...")
