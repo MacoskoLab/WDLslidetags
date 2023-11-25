@@ -259,11 +259,11 @@ print("-----COMPLETED READ_SHEET.PY-----")
 
 
 ### DOCUMENTATION
-# This script reads the spreadsheet, validating the input and writing files needed for downstream tasks
+# This script reads the spreadsheet, validates the input, and writes files needed for downstream tasks
 # See the workflow README for information on the input/output for these tasks
 
 ### ASSERTIONS
-# the bucket must exist and be accessible
+# The bucket must exist and be accessible
 # 'upload_for_google_key.json' is required to access the spreadsheet
 # The BCL must appear uniquely in the BCL column across all spreadsheets
 # Number of transcriptomes must match the number of RNA indexes (add X for blank rows)
