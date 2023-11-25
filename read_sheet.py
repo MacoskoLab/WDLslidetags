@@ -242,18 +242,18 @@ else:
     print(f"Not enough information to create SBcounts.tsv, writing a blank file...")
     open("SBcounts.tsv", 'w').close()
 
-# Write the make_seurat.tsv
+# Write the Spatial.tsv
 if run_make_seurat:
-    print("Writing Seurat.tsv...")
-    with open("Seurat.tsv", mode='w', newline='') as file:
+    print("Writing Spatial.tsv...")
+    with open("Spatial.tsv", mode='w', newline='') as file:
         writer = csv.writer(file, delimiter='\t')
         for RNAind,SBind in zip(RNAindexes, SBindexes):
             if RNAind not in empty and SBind not in empty:
                 writer.writerow([f"gs://{bucket}/03_COUNTS/{bcl}/{RNAind}", f"gs://{bucket}/04_SPATIAL/{bcl}/{SBind}"])
-    print(f"Done ({sum(1 for line in open('Seurat.tsv'))} lines written)")
+    print(f"Done ({sum(1 for line in open('Spatial.tsv'))} lines written)")
 else:
-    print(f"Not enough information to create Seurat.tsv, writing a blank file...")
-    open("Seurat.tsv", 'w').close()
+    print(f"Not enough information to create Spatial.tsv, writing a blank file...")
+    open("Spatial.tsv", 'w').close()
 
 print("-----COMPLETED READ_SHEET.PY-----")
 
