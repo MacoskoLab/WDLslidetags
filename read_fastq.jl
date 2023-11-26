@@ -11,14 +11,16 @@ using Combinatorics: combinations
 
 # Read the command-line arguments
 if length(ARGS) != 2
-    println("Usage: julia readfastq.jl fastqpath puck.csv")
+    println("Usage: julia readfastq.jl fastqpath puckpath")
     @assert false
 end
 fastqpath = ARGS[1] ; println("FASTQS path: "*fastqpath)
-puck = ARGS[2] ; println("Puck file: "*puck)
+puckpath = ARGS[2] ; println("Puck path: "*puckpath)
+CBdictpath = "3M-february-2018.txt"
 
 @assert isdir(fastqpath)
-@assert isfile(puck)
+@assert isdir(puckpath)
+@assert isfile(CBdictpath)
 
 ################################################################################
 ##### Load the data ############################################################
@@ -27,15 +29,29 @@ puck = ARGS[2] ; println("Puck file: "*puck)
 # Load the FASTQ paths
 fastqs = readdir(fastqpath,join=true)
 R1s = filter(s -> occursin("_R1_", s), fastqs) ; println("R1s: ", basename.(R1s))
-R2s = filter(s -> occursin("_R2_", s), fastqs) ; println("R2s: ", basename.(R2s), "\n")
+R2s = filter(s -> occursin("_R2_", s), fastqs) ; println("R2s: ", basename.(R2s))
 @assert length(R1s) == length(R2s) > 0
 
-# Load the puck.csv
-puckdf = CSV.read(puck, DataFrame, header=false)
-rename!(puckdf, [:sb, :x, :y])
-println("Loaded $puck: $(nrow(puckdf)) spatial barcodes found")
-@assert all(length(s) == 14 for s in puckdf.sb) "Some SB do not have 14bp"
-@assert length(puckdf.sb) == length(Set(puckdf.sb)) "Some SB in the puck are repeated"
+# load the pucks
+pucks = readdir(puckpath,join=true)
+println("Pucks: ",basename.(pucks))
+puckdfs = [rename(CSV.read(puck, DataFrame, header=false),[:sb, :x, :y]) for puck in pucks]
+SBwhitelist = Set{String15}()
+for (puck,puckdf) in zip(pucks,puckdfs)
+    println("Loaded $(basename(puck)): $(nrow(puckdf)) spatial barcodes found")
+    @assert all(length(s) == 14 for s in puckdf.sb) "Some SB in $puck do not have 14bp"
+    @assert length(puckdf.sb) == length(Set(puckdf.sb)) "Some SB in $puck are repeated"
+    for sb in puckdf.sb
+        push!(SBwhitelist,sb)
+    end
+end
+SBwhitelist = collect(SBwhitelist)
+println("Total SB: $(length(SBwhitelist))")
+
+# Load the CB remapping dictionary
+CBdf = CSV.File(CBdictpath, delim='\t', header=false) |> DataFrame
+CBremap = Dict(CBdf[!, 2] .=> CBdf[!, 1])
+empty!(CBdf)
 
 ################################################################################
 ##### Learn R1 and R2 ##########################################################
@@ -122,15 +138,15 @@ GGset = Set{String31}(reduce(union, [listHDneighbors(GGseq,i) for i in 0:3]))
 
 # store exact SB matches
 SBtoindex = Dict{Tuple{String15,String15},Int64}()
-for (i,sb) in enumerate(puckdf.sb)
+for (i,sb) in enumerate(SBwhitelist)
     if !occursin('N',sb)
         SBtoindex[(sb[1:8],sb[9:14])] = i
     end
 end
 
-# store fuzzy SB matches (==0 is ambiguous, >0 is success, -1 is DNE)
+# store fuzzy SB matches (==0 is ambiguous, >0 is unique, -1 is DNE)
 SBtoindexHD1 = Dict{Tuple{String15,String15},Int64}()
-for (i,sb) in enumerate(puckdf.sb)
+for (i,sb) in enumerate(SBwhitelist)
     if !occursin('N',sb)
         for sb_f in listHDneighbors(sb,1)
             sbtuple = (sb_f[1:8],sb_f[9:14])
@@ -247,6 +263,9 @@ end
 @assert m["1D-"]+m["1D-1X"]+m["-"]+m["-1X"]+m["-1D"]+m["-2X"] == sum(values(p))
 @assert p["exact"]+p["HD1"] == sum(values(mat))
 
+empty!(SBtoindex)
+empty!(SBtoindexHD1)
+
 # Turn matrix into dataframe
 cblist = UInt32[]
 umilist = UInt32[]
@@ -258,6 +277,7 @@ for ((cb, umi, sb), r) in mat
     push!(sblist, sb)
     push!(readslist, r)
 end
+
 empty!(mat)
 GC.gc()
 
@@ -277,13 +297,16 @@ df = filter(row -> row.ismax == true && row.toptie == false, df)
 df = select(df, :cb, :umi, :sb, :reads)
 chimera_stats["reads_after"]=sum(df.reads) ; chimera_stats["umis_after"]=nrow(df)
 
-# Rename cell barcodes from 2-bit encoding to cb_list index
+# Change cb column from 2-bit encoding to index into list of all observed barcodes
 cbi_list = unique(df.cb) ; cb_dict = Dict{UInt32,Int64}(e=>i for (i,e) in enumerate(cbi_list))
-cb_list = Vector{String31}([indextoCB(cbi) for cbi in cbi_list])
 transform!(df, :cb => (x->[cb_dict[y] for y in x]) => :cb)
 sort!(df, :reads, rev=true)
 
-# Convert to 32-bit integers (R doesn't use 64-bit integers)
+# Remap cell barcodes from 2-bit encoding to nucleotide sequence
+cb_list = Vector{String31}([indextoCB(cbi) for cbi in cbi_list])
+cb_list_remap = Vector{String31}([get(CBremap,cb,"") for cb in cb_list])
+
+# Convert to 32-bit integers (cuts down on size - can skip if need more room)
 @assert maximum(df.cb) < 2^32-1
 @assert maximum(df.sb) < 2^32-1
 @assert maximum(df.reads) < 2^32-1
@@ -303,10 +326,16 @@ downsampling = [length(Set([reads_cumsum[i] for i in sample(1:nreads, Int64(roun
 h5open("SBcounts.h5", "w") do file
     create_group(file, "lists")
     file["lists/cb_list", compress=9] = cb_list
+    file["lists/cb_list_remap", compress=9] = cb_list_remap
     file["lists/sb_list", compress=9] = puckdf.sb
-    file["lists/x_list", compress=9] = puckdf.x
-    file["lists/y_list", compress=9] = puckdf.y
-    
+
+    create_group(file, "puck")
+    file["puck/sb", compress=9] = puckdf.sb
+    file["puck/x", compress=9] = puckdf.x
+    file["puck/y", compress=9] = puckdf.y
+    file["puck/puck_index", compress=9] = puckdf.y
+    file["puck/puck_list", compress=9] = puckdf.y
+
     create_group(file, "matrix")
     file["matrix/cb_index", compress=9] = df.cb
     file["matrix/umi", compress=9] = df.umi
@@ -318,7 +347,7 @@ h5open("SBcounts.h5", "w") do file
     file["metadata/R1s"] = R1s
     file["metadata/R2s"] = R2s
     file["metadata/switch"] = convert(Int8, switch)
-    file["metadata/puck"] = puck
+    file["metadata/puck"] = puckpath
     file["metadata/num_reads"] = reads
 
     create_group(file, "metadata/UP_matching")
@@ -349,11 +378,11 @@ end;
 #      - allow fuzzy matching with either 1 mismatch or 1 deletion
 #   4) barcode sequence conversions
 #      - it is too expensive to store the full barcode sequences as keys in the dictionary
-#      - spatial barcodes (sb) will be stored as the index in the sb column of the puck .csv file
+#      - spatial barcodes will be stored as the index in the sb column of the puck .csv file
 #      - the cell barcode (cb) and umi will be 2-bit encoded, then the cb will be turned into an index as well
 #   5) dictionary update
 #      - for reads that made it this far, the (cb,umi,sb) key of the dictionary will be incremented by 1
 # The final result of the FASTQ reading step is a dictionary, where the keys are encoded (CB, UMI, SB) and the values are the number of reads
 #   6) convert the dictionary to a dataframe
 #   7) remove chimeras - each (cb,umi) should have a unique sb
-# IMPORTANT NOTE: the output cell barcodes will likely need to be remapped using 3M-february-2018.txt
+#   8) turn the 2-bit encoded cell barcodes into native and remapped barcode sequences
