@@ -1,8 +1,9 @@
 using CSV
 using HDF5
 using FASTX
-using IterTools: product
 using CodecZlib
+using IterTools: product
+using StatsBase: sample
 using DataFrames
 using StringViews
 using LinearAlgebra: dot
