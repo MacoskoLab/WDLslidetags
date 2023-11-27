@@ -352,7 +352,6 @@ h5open("SBcounts.h5", "w") do file
     file["metadata/R1s"] = R1s
     file["metadata/R2s"] = R2s
     file["metadata/switch"] = convert(Int8, switch)
-    file["metadata/puck"] = puckpath
     file["metadata/num_reads"] = reads
 
     create_group(file, "metadata/UP_matching")
