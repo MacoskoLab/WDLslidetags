@@ -153,7 +153,6 @@ if pucks!=None:
     pucks = [[puck.strip() for puck in pucklist.split(",")] for pucklist in pucks.split('\n')]
     pucks = [[f"{puck}.csv" if (puck[-4:]!=".csv") else puck for puck in pucklist if puck not in empty] for pucklist in pucks]
     assert len(pucks) == len(SBindexes), f"Number of pucks ({len(pucks)}) does not match the number of SB indexes ({len(SBindexes)}), add X for blank"
-    # assert all( for pucklist in pucks for puck in pucklist if puck not in empty), "ERROR: Not all pucks exist in the bucket"
     for puck in [puck for pucklist in pucks for puck in pucklist]:
         if not checkgsfile(f'gs://{bucket}/pucks/{puck}'):
             assert False, f"Puck {puck} does not exist in the bucket, aborting..."
@@ -182,13 +181,6 @@ assert all(val==None or (' ' not in val) for val in allvals), "ERROR: Remove all
 if checkgsfile(f"gs://{bucket}/02_FASTQS/{bcl}"):
     print(f"mkfastq output for {bcl} already exists, will not run mkfastq")
     lanes = None
-
-# Refuse to run RNAcounts on indexes that already have an output folder
-if isinstance(RNAindexes,list):
-    for i,ind in enumerate(RNAindexes):
-        if checkgsfile(f"gs://{bucket}/03_COUNTS/{bcl}/{ind}"):
-            print(f"{ind} already exists, skipping RNAcounts for this index")
-            RNAindexes[i] = "X"
 
 #### Create Files ##############################################################
 
@@ -220,10 +212,13 @@ if run_RNAcounts:
         writer = csv.writer(file, delimiter='\t')
         for ind,ref,probe in zip(RNAindexes,transcriptomes,probes):
             if ind not in empty and ref not in empty:
-                if probe in empty:
-                    writer.writerow([ind, ref])
+                if not checkgsfile(f"gs://{bucket}/03_COUNTS/{bcl}/{ind}"):
+                    if probe in empty:
+                        writer.writerow([ind, ref])
+                    else:
+                        writer.writerow([ind, ref, probe])
                 else:
-                    writer.writerow([ind, ref, probe])
+                    print(f"{ind} already exists, skipping RNAcounts for this index")
     print(f"Done ({sum(1 for line in open('RNAcounts.tsv'))} lines written)")
 else:
     print(f"Not enough information to create RNAcounts.tsv, writing a blank file...")
@@ -258,11 +253,11 @@ else:
 print("-----COMPLETED READ_SHEET.PY-----")
 
 
-### DOCUMENTATION
+### DOCUMENTATION ###
 # This script reads the spreadsheet, validates the input, and writes files needed for downstream tasks
 # See the workflow README for information on the input/output for these tasks
 
-### ASSERTIONS
+### ASSERTIONS ###
 # The bucket must exist and be accessible
 # 'upload_for_google_key.json' is required to access the spreadsheet
 # The BCL must appear uniquely in the BCL column across all spreadsheets
