@@ -1,7 +1,6 @@
 using CSV
 using HDF5
 using FASTX
-using StatsBase: sample
 using IterTools: product
 using CodecZlib
 using DataFrames
@@ -323,24 +322,29 @@ downsampling = [length(Set([reads_cumsum[i] for i in sample(1:nreads, Int64(roun
 ##### Save results #############################################################
 ################################################################################
 
+for (i,puckdf) in enumerate(puckdfs)
+    puckdf[!, :puck_index] = fill(UInt8(i), nrow(puckdf))
+end
+puckdf = vcat(puckdfs...)
+
 h5open("SBcounts.h5", "w") do file
     create_group(file, "lists")
     file["lists/cb_list", compress=9] = cb_list
     file["lists/cb_list_remap", compress=9] = cb_list_remap
-    file["lists/sb_list", compress=9] = puckdf.sb
-
-    create_group(file, "puck")
-    file["puck/sb", compress=9] = puckdf.sb
-    file["puck/x", compress=9] = puckdf.x
-    file["puck/y", compress=9] = puckdf.y
-    file["puck/puck_index", compress=9] = puckdf.y
-    file["puck/puck_list", compress=9] = puckdf.y
+    file["lists/sb_list", compress=9] = SBwhitelist
 
     create_group(file, "matrix")
     file["matrix/cb_index", compress=9] = df.cb
     file["matrix/umi", compress=9] = df.umi
     file["matrix/sb_index", compress=9] = df.sb
     file["matrix/reads", compress=9] = df.reads
+
+    create_group(file, "puck")
+    file["puck/sb", compress=9] = puckdf.sb
+    file["puck/x", compress=9] = puckdf.x
+    file["puck/y", compress=9] = puckdf.y
+    file["puck/puck_index", compress=9] = puckdf.puck_index
+    file["puck/puck_list"] = basename.(pucks)
 
     create_group(file, "metadata")
     
@@ -370,19 +374,18 @@ end;
 ################################################################################
 
 # The workflow for processing the FASTQs is as follows:
-#   1) throw out reads that have an N in read 1, which contains the cb and umi (shouldn't be very many cases)
+#   1) throw out reads that have an N in read 1, which contains the cb (cell barcode) and umi (unique molecular identifier)
 #   2) throw out reads that don't have a detectable UP site
 #      - UP site does fuzzy matching - allows 1 deletion or up to 2 mismatches
 #      - this is implemented by a few Set() objects made in advance that contain all possible fuzzy matches
 #   3) throw out reads whose spatial barcode (sb) doesn't match the puck whitelist
 #      - allow fuzzy matching with either 1 mismatch or 1 deletion
-#   4) barcode sequence conversions
-#      - it is too expensive to store the full barcode sequences as keys in the dictionary
-#      - spatial barcodes will be stored as the index in the sb column of the puck .csv file
-#      - the cell barcode (cb) and umi will be 2-bit encoded, then the cb will be turned into an index as well
-#   5) dictionary update
+#   4) dictionary update
 #      - for reads that made it this far, the (cb,umi,sb) key of the dictionary will be incremented by 1
-# The final result of the FASTQ reading step is a dictionary, where the keys are encoded (CB, UMI, SB) and the values are the number of reads
+#      - cb and umi are 2-bit encoded
+#      - sb is stored as an index into the SBwhitelist vector
+# The final result of the FASTQ reading step is a dictionary, where the keys are encoded (cb, umi, sb) and the values are the number of reads
 #   6) convert the dictionary to a dataframe
 #   7) remove chimeras - each (cb,umi) should have a unique sb
 #   8) turn the 2-bit encoded cell barcodes into native and remapped barcode sequences
+#   9) generate the .h5 file, which contains the count matrix and various metadata
