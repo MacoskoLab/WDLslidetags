@@ -1,13 +1,14 @@
 FROM cumulusprod/cellranger:7.1.0
 SHELL ["/bin/bash", "-c"]
 
-RUN apt-get update                                        && \
-    apt-get install -y --no-install-recommends zlib1g-dev && \
-    apt-get install -y --no-install-recommends dstat moreutils zip less socat
+RUN apt-get update                                                                                   && \
+    apt-get install -y --no-install-recommends zlib1g-dev libcurl4-gnutls-dev libssl-dev libxml2-dev && \
+    apt-get install -y --no-install-recommends libpng-dev libudunits2-dev libhdf5-dev                && \
+    apt-get install -y --no-install-recommends liblapack-dev libblas-dev gfortran                    && \
+    apt-get install -y --no-install-recommends dstat moreutils zip less socat wget                   && \
+    apt-get install -y --no-install-recommends r-base
 
 # zlib1g needed for bcl2fastq
-# dstat..., needed for capturing the usage, etc. Not for bcl2fastq
-# socat is optional but helpful for debugging with reverse shell
 
 # ==> FROM THIS
 
@@ -53,12 +54,45 @@ RUN apt-get -qq -y autoremove && \
     apt-get clean             && \
     rm -rf /var/lib/apt/lists/* /var/log/dpkg.log
 
-ADD ./make_samplesheet.py /make_samplesheet.py
-ADD ./upload_for_google_key.json /upload_for_google_key.json
-
 # need dnspython for hacks, see make_samplesheet.py
 RUN pip install --no-cache-dir gspread dnspython
 
+RUN wget -P /software https://julialang-s3.julialang.org/bin/linux/x64/1.8/julia-1.8.5-linux-x86_64.tar.gz && \
+    tar -xzvf /software/julia-1.8.5-linux-x86_64.tar.gz -C /software                                       && \
+    rm /software/julia-1.8.5-linux-x86_64.tar.gz
+
+RUN /software/julia-1.8.5/bin/julia -e 'using Pkg;               \
+                                        Pkg.add("CSV");          \
+                                        Pkg.add("GZip");         \
+                                        Pkg.add("HDF5");         \
+                                        Pkg.add("FASTX");        \
+                                        Pkg.add("IterTools");    \
+                                        Pkg.add("CodecZlib");    \
+                                        Pkg.add("StatsBase");    \
+                                        Pkg.add("DataFrames");   \
+                                        Pkg.add("StringViews");  \
+                                        Pkg.add("Combinatorics");\
+                                        Pkg.add("LinearAlgebra")'
+
+RUN R -e "install.packages(c('qs',        \
+                             'glue',      \
+                             'qpdf',      \
+                             'purrr',     \
+                             'dplyr',     \
+                             'rlist',     \
+                             'rdist',     \
+                             'hdf5r',     \
+                             'Seurat',    \
+                             'dbscan',    \
+                             'stringr',   \
+                             'viridis',   \
+                             'cowplot',   \
+                             'ggplot2',   \
+                             'magrittr',  \
+                             'parallel',  \
+                             'jsonlite',  \
+                             'gridExtra', \
+                             'matrixStats'), repos='http://cran.rstudio.com/')"
 
 # in this directory:
 # docker build -t slidetags_presquash .
@@ -67,4 +101,3 @@ RUN pip install --no-cache-dir gspread dnspython
 
 # BUT TO PUSH:
 # go into 01_for_squash and run there
-
