@@ -287,15 +287,15 @@ df = DataFrame(cb = cblist, umi = umilist, sb = sblist, reads = readslist)
 ##### Process the results ######################################################
 ################################################################################
 
-# Remove chimeras
-chimera_stats = Dict{String,Int64}()
-chimera_stats["reads_before"]=sum(df.reads) ; chimera_stats["umis_before"]=nrow(df)
-df = groupby(df, [:cb, :umi])
-df = transform(df, :reads => (x -> x.==maximum(x)) => :ismax, ungroup=false)
-df = transform(df, :ismax => (x -> sum(x)>1) => :toptie, ungroup=true)
-df = filter(row -> row.ismax == true && row.toptie == false, df)
-df = select(df, :cb, :umi, :sb, :reads)
-chimera_stats["reads_after"]=sum(df.reads) ; chimera_stats["umis_after"]=nrow(df)
+# # Remove chimeras (this is done later in R)
+# chimera_stats = Dict{String,Int64}()
+# chimera_stats["reads_before"]=sum(df.reads) ; chimera_stats["umis_before"]=nrow(df)
+# df = groupby(df, [:cb, :umi])
+# df = transform(df, :reads => (x -> x.==maximum(x)) => :ismax, ungroup=false)
+# df = transform(df, :ismax => (x -> sum(x)>1) => :toptie, ungroup=true)
+# df = filter(row -> row.ismax == true && row.toptie == false, df)
+# df = select(df, :cb, :umi, :sb, :reads)
+# chimera_stats["reads_after"]=sum(df.reads) ; chimera_stats["umis_after"]=nrow(df)
 
 # Change cb column from 2-bit encoding to index into list of all observed barcodes
 cbi_list = unique(df.cb) ; cb_dict = Dict{UInt32,Int64}(e=>i for (i,e) in enumerate(cbi_list))
@@ -362,9 +362,9 @@ h5open("SBcounts.h5", "w") do file
     file["metadata/SB_matching/type"] = keys(p) |> collect
     file["metadata/SB_matching/count"] = values(p) |> collect
 
-    create_group(file, "metadata/chimera_stats")
-    file["metadata/chimera_stats/type"] = keys(chimera_stats) |> collect
-    file["metadata/chimera_stats/count"] = values(chimera_stats) |> collect
+    # create_group(file, "metadata/chimera_stats")
+    # file["metadata/chimera_stats/type"] = keys(chimera_stats) |> collect
+    # file["metadata/chimera_stats/count"] = values(chimera_stats) |> collect
     
     file["metadata/downsampling"] = downsampling
 end;
@@ -385,7 +385,6 @@ end;
 #      - cb and umi are 2-bit encoded
 #      - sb is stored as an index into the SBwhitelist vector
 # The final result of the FASTQ reading step is a dictionary, where the keys are encoded (cb, umi, sb) and the values are the number of reads
-#   6) convert the dictionary to a dataframe
-#   7) remove chimeras - each (cb,umi) should have a unique sb
-#   8) turn the 2-bit encoded cell barcodes into native and remapped barcode sequences
-#   9) generate the .h5 file, which contains the count matrix and various metadata
+#   5) convert the dictionary to a dataframe
+#   6) turn the 2-bit encoded cell barcodes into native and remapped barcode sequences
+#   7) generate the .h5 file, which contains the count matrix and various metadata
