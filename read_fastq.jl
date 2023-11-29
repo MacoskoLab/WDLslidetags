@@ -323,6 +323,8 @@ downsampling = [length(Set([reads_cumsum[i] for i in sample(1:nreads, Int64(roun
 ##### Save results #############################################################
 ################################################################################
 
+println("Saving Results")
+
 for (i,puckdf) in enumerate(puckdfs)
     puckdf[!, :puck_index] = fill(UInt8(i), nrow(puckdf))
 end
@@ -368,6 +370,8 @@ h5open("SBcounts.h5", "w") do file
     
     file["metadata/downsampling"] = downsampling
 end;
+
+println("Done")
 
 ################################################################################
 ##### Documentation ############################################################
