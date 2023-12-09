@@ -6,7 +6,7 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends dstat moreutils zip less socat wget sudo curl gdebi-core && \
     apt-get install -y --no-install-recommends libfontconfig1-dev libharfbuzz-dev libfribidi-dev        && \
     apt-get install -y --no-install-recommends libfreetype6-dev libpng-dev libtiff5-dev libjpeg-dev     && \
-    apt-get install -y --no-install-recommends libcairo2-dev zlib1g libssl-dev
+    apt-get install -y --no-install-recommends libcairo2-dev zlib1g libssl-dev libhdf5-dev
 
 # Install R
 RUN export R_VERSION=4.3.0 && \
@@ -35,33 +35,6 @@ RUN mkdir ${BUILD}                                            && \
     rm -rf /software/bcl2fastq-build
 ENV PATH=$INSTALL_DIR/bin:$PATH
 
-# Install R libraries
-RUN R -e "if (!require('BiocManager',quietly=T)) {install.packages('BiocManager',repos='http://cran.rstudio.com/')}; \
-          BiocManager::install('rhdf5')"
-RUN R -e "install.packages(c('qs',          \
-                             'glue',        \
-                             'qpdf',        \
-                             'purrr',       \
-                             'dplyr',       \
-                             'rlist',       \
-                             'rdist',       \
-                             'tidyr',       \
-                             'Seurat',      \
-                             'dbscan',      \
-                             'ggrastr',     \
-                             'stringr',     \
-                             'viridis',     \
-                             'cowplot',     \
-                             'ggplot2',     \
-                             'magrittr',    \
-                             'parallel',    \
-                             'jsonlite',    \
-                             'gridExtra',   \
-                             'stringdist',  \
-                             'ggnewscale',  \
-                             'matrixStats', \
-                             'SeuratObject'), repos='http://cran.rstudio.com/')"
-
 # Install Julia
 RUN wget -P /software https://julialang-s3.julialang.org/bin/linux/x64/1.8/julia-1.8.5-linux-x86_64.tar.gz && \
     tar -xzvf /software/julia-1.8.5-linux-x86_64.tar.gz -C /software                                       && \
@@ -81,4 +54,33 @@ RUN /software/julia-1.8.5/bin/julia -e 'using Pkg;               \
 
 # Install Python packages
 RUN pip install --no-cache-dir gspread dnspython
+
+# Install R libraries
+RUN R -e "if (!require('BiocManager',quietly=T)) {install.packages('BiocManager',repos='http://cran.rstudio.com/')}; \
+          BiocManager::install('rhdf5')"
+RUN R -e "install.packages(c('qs',          \
+                             'glue',        \
+                             'qpdf',        \
+                             'purrr',       \
+                             'dplyr',       \
+                             'rlist',       \
+                             'rdist',       \
+                             'tidyr',       \
+                             'hdf5r',       \
+                             'Seurat',      \
+                             'dbscan',      \
+                             'ggrastr',     \
+                             'stringr',     \
+                             'viridis',     \
+                             'cowplot',     \
+                             'ggplot2',     \
+                             'magrittr',    \
+                             'parallel',    \
+                             'jsonlite',    \
+                             'gridExtra',   \
+                             'stringdist',  \
+                             'ggnewscale',  \
+                             'matrixStats', \
+                             'SeuratObject'), repos='http://cran.rstudio.com/')"
+
 
