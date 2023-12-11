@@ -62,12 +62,14 @@ RUN R -e "install.packages(c('qs',          \
                              'glue',        \
                              'qpdf',        \
                              'purrr',       \
+                             'furrr',       \
                              'dplyr',       \
                              'rlist',       \
                              'rdist',       \
                              'tidyr',       \
                              'hdf5r',       \
                              'Seurat',      \
+                             'future',      \
                              'dbscan',      \
                              'ggrastr',     \
                              'stringr',     \
