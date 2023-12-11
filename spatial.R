@@ -3,7 +3,6 @@ library(matrixStats)
 library(ggnewscale)
 library(stringdist)
 library(gridExtra)
-library(parallel)
 library(magrittr)
 library(ggplot2)
 library(cowplot)
@@ -11,13 +10,15 @@ library(viridis)
 library(ggrastr)
 library(Seurat)
 library(dbscan)
+library(rlist)
 library(dplyr)
 library(purrr)
+library(furrr)
 library(rhdf5)
 library(qpdf)
 library(qs)
 
-setwd("~/SBcounts/317/")
+# setwd("~/SBcounts/317/")
 
 ### Download files #############################################################
 
@@ -46,11 +47,13 @@ if (checkgsfile(file.path(RNApath,"outs/filtered_feature_bc_matrix.h5"))) {
   system(g("gsutil cp {RNApath}/outs/filtered_feature_bc_matrix.h5 RNAcounts"))
   system(g("gsutil cp {RNApath}/outs/raw_feature_bc_matrix.h5 RNAcounts"))
   system(g("gsutil cp {RNApath}/outs/molecule_info.h5 RNAcounts"))
+  system(g("gsutil cp {RNApath}/outs/metrics_summary.csv RNAcounts"))
 } else if (checkgsfile(file.path(RNApath,"outs/multi"))) {
   RNAtech = "multi"
   system(g("gsutil cp {RNApath}/outs/multi/count/raw_feature_bc_matrix.h5 RNAcounts"))
-  system(g("gsutil cp {RNApath}/outs/per_sample_outs/{basename(RNApath)}/count/sample_filtered_feature_bc_matrix.h5 RNAcounts/filtered_feature_bc_matrix.h5"))
-  system(g("gsutil cp {RNApath}/outs/per_sample_outs/{basename(RNApath)}/count/sample_molecule_info.h5 RNAcounts/molecule_info.h5"))
+  system(g("gsutil cp {RNApath}/outs/per_sample_outs/{basename(RNApath)}/count/sample_filtered_feature_bc_matrix.h5 RNAcounts/filtered_feature_bc_matrix.h5 RNAcounts"))
+  system(g("gsutil cp {RNApath}/outs/per_sample_outs/{basename(RNApath)}/count/sample_molecule_info.h5 RNAcounts/molecule_info.h5 RNAcounts"))
+  system(g("gsutil cp {RNApath}/outs/per_sample_outs/{basename(RNApath)}/metrics_summary.csv RNAcounts"))
 } else {
   print("Unknown RNA directory structure, exiting...")
   stopifnot(F)
@@ -98,7 +101,7 @@ if (file.exists("RNAcounts/molecule_info.h5")) {
                              umi=fetch("umi"),
                              umi_type=fetch("umi_type"))
   info %<>% group_by(barcode) %>% summarize(numi=n(), pct.intronic=sum(umi_type==0)/numi)
-  obj$pct.intronic = info$pct.intronic[match(colnames(obj),info$barcode)]
+  obj$pct.intronic = info$pct.intronic[match(colnames(obj),info$barcode)] * 100
   rm(info) ; rm(fetch)
 }
 
@@ -150,16 +153,17 @@ stopifnot(!duplicated(names(matching_dict)))
 rm(res) ; rm(chunk_size)
 
 # Convert cb_index from an index into cb_list to an index into cb_whitelist
-df %<>% mutate(cb_index = matching_dict[as.character(cb_index)])
+df %<>% mutate(cb_whitelist_index=matching_dict[as.character(cb_index)], cb_index=ifelse(is.na(cb_whitelist_index),-cb_index,cb_whitelist_index)) %>% select(-cb_whitelist_index)
 rm(matching_dict) ; rm(cb_list) ; rm(cb_list_remap)
 
-# remove reads that didn't match a called cell
-reads_before_cb_filter = sum(df$reads)
-df %<>% filter(!is.na(cb_index))
-reads_after_cb_filter = sum(df$reads)
-
 # compress duplicate rows introduced by fuzzy matching
-df %<>% group_by(cb_index, umi_2bit, sb_index) %>% summarize(reads = sum(reads)) %>% ungroup
+df %<>% group_by(cb_index, umi_2bit, sb_index) %>% summarize(reads = sum(reads)) %>% ungroup %>% as.data.frame %>% arrange(desc(reads))
+
+# Remove chimeric reads
+df %<>% group_by(cb_index,umi_2bit) %>% mutate(ismax = reads==max(reads), toptie = sum(ismax)>1) %>% ungroup
+reads_before_chimera_filter = sum(df$reads)
+df %<>% filter(ismax==T & toptie == F) %>% select(-ismax,-toptie)
+reads_after_chimera_filter = sum(df$reads)
 
 # remap the whitelist back
 if (remap) {
@@ -168,11 +172,33 @@ if (remap) {
 }
 stopifnot(!duplicated(cb_whitelist))
 
-# Remove chimeric reads
-df %<>% group_by(cb_index,umi_2bit) %>% mutate(ismax = reads==max(reads), toptie = sum(ismax)>1) %>% ungroup
-reads_before_chimera_filter = sum(df$reads)
-df %<>% filter(ismax==T & toptie == F) %>% select(-ismax,-toptie)
-reads_after_chimera_filter = sum(df$reads)
+# Make a plot of the distributions
+plotSBumicurves <- function(df) {
+  df %<>% group_by(cb_index,sb_index) %>% summarize(umi=n()) %>% ungroup %>% arrange(desc(umi))
+  cb.data = df %>% group_by(cb_index) %>% dplyr::summarize(umi=sum(umi)) %>% {.[order(.$umi,decreasing=T),]} %>% {mutate(.,index=1:nrow(.),filter="all cell barcodes")}
+  sb.data = df %>% group_by(sb_index) %>% dplyr::summarize(umi=sum(umi)) %>% {.[order(.$umi,decreasing=T),]} %>% {mutate(.,index=1:nrow(.),filter="all cell barcodes")}
+  
+  df %<>% filter(cb_index > 0)
+  cb.data2 = df %>% group_by(cb_index) %>% dplyr::summarize(umi=sum(umi)) %>% {.[order(.$umi,decreasing=T),]} %>% {mutate(.,index=1:nrow(.),filter="called cell barcodes only")}
+  sb.data2 = df %>% group_by(sb_index) %>% dplyr::summarize(umi=sum(umi)) %>% {.[order(.$umi,decreasing=T),]} %>% {mutate(.,index=1:nrow(.),filter="called cell barcodes only")}
+  
+  p1 = rbind(sb.data, sb.data2) %>% ggplot(aes(x=index,y=umi,col=filter))+geom_line()+
+    scale_x_log10()+scale_y_log10()+theme_bw()+ggtitle("SB UMI per bead")+ylab("SB UMI counts")+xlab("Beads")+
+    theme(legend.position = c(0.05, 0.05), legend.justification = c("left", "bottom"), legend.background = element_blank(), legend.spacing.y = unit(0.1,"lines"))
+  
+  p2 = rbind(cb.data, cb.data2) %>% ggplot(aes(x=index, y=umi,col=filter))+geom_line()+
+    scale_x_log10()+scale_y_log10()+theme_bw()+ggtitle("SB UMI per cell")+ylab("SB UMI counts")+xlab("Cell barcodes")+
+    theme(legend.position = c(0.05, 0.05), legend.justification = c("left", "bottom"), legend.background = element_blank(), legend.spacing.y = unit(0.1,"lines"))
+  
+   return(list(p1,p2))
+  
+}
+umicurves = plotSBumicurves(df)
+
+# remove reads that didn't match a called cell
+reads_before_cb_filter = sum(df$reads)
+df %<>% filter(cb_index>0)
+reads_after_cb_filter = sum(df$reads)
 
 # load the puck information
 pucks = f("puck/puck_list") ; stopifnot(len(pucks)==1)
@@ -201,12 +227,15 @@ opt_dbscan <- function(data.list) {
   eps.vec = c(50) ; minPts.vec = c(3:500)
   params = expand.grid(eps.vec,minPts.vec) %>% setNames(c("eps","minPts"))
   row_lists = chunk_vector(1:nrow(params), round(nrow(params)/30))
-  params$pct = parallel::mclapply(row_lists, function(v) {
+
+  plan(multisession, workers=30L)
+  params$pct = furrr::future_map(row_lists, function(v) {
     map_dbl(v, function(i) {
       m = map_lgl(data.list, ~max(dbscan::dbscan(.[c("x_um","y_um")], eps=params$eps[[i]], minPts=params$minPts[[i]], weights=.$umi)$cluster) == 1)
       return(sum(m)/length(m))
     })
-  },mc.cores=30L) %>% flatten_dbl
+  }, .options=furrr_options(seed=T)) %>% flatten_dbl
+  
   params$is.max = params$pct==max(params$pct)
   
   eps = params$eps[params$is.max][[1]] ; minPts = params$minPts[params$is.max][[1]]
@@ -275,6 +304,7 @@ binned_positioning <- function(df) {
     data.list %<>% map(~mutate(.,bin=quant))
     return(data.list)
   }) %>% list_flatten
+  
   coords <- create_coords(data.list)
   return(coords)
 }
@@ -287,12 +317,14 @@ binned_positioning <- function(df) {
 # Perform positioning at various levels of downsampling
 nreads = sum(df$reads)
 reads_cumsum = map(1:nrow(df),~rep(.,df$reads[[.]])) %>% flatten_int
-coords_list = lapply(seq(0.05,1,0.05), function(i) {
+original_df <- df ; rm(df)
+coords_list = list()
+for (i in seq(0.05,1,0.05)) {
   print(g("Downsampling: {round(i*100)}%"))
   
   # downsample the dataframe
   newreads = sample(reads_cumsum,round(nreads*i),replace=F) %>% table %>% as.data.frame %>% setNames(c("row","newreads"))
-  df %<>% mutate(row=1:nrow(df)) %>% merge(newreads,by="row") %>% mutate(reads=newreads) %>% select(-newreads,-row)
+  df <- original_df %>% mutate(row=1:nrow(original_df)) %>% merge(newreads,by="row") %>% mutate(reads=newreads) %>% select(-newreads,-row)
   
   # group by cb,sb to count umis
   df %<>% group_by(cb_index,sb_index) %>% summarize(umi=n()) %>% ungroup %>% arrange(desc(umi))
@@ -306,8 +338,11 @@ coords_list = lapply(seq(0.05,1,0.05), function(i) {
   
   # run positioning
   coords <- binned_positioning(df)
-  return(coords)
-})
+  coords_list %<>% list.append(coords)
+}
+
+# clean up
+rm(original_df) ; rm(puckdf)
 
 # merge with seurat object
 coords <- tail(coords_list,1)[[1]]
@@ -321,10 +356,6 @@ obj[["spatial"]] <- CreateDimReducObject(embeddings = as.matrix(emb), key = "s_"
 coords %>% select(cb,everything()) %>% select(-cb_index) %>% write.csv("coords.csv",quote=F,row.names=F)
 qsave(obj, "seurat.qs")
 
-df %<>% group_by(cb_index,sb_index) %>% summarize(umi=n()) %>% ungroup %>% arrange(desc(umi))
-maxumi = 256
-df %<>% group_by(sb_index) %>% mutate(origumi = umi, totumi=sum(umi), umi=ifelse(totumi>maxumi, umi/totumi*maxumi, umi)) %>% ungroup %>% select(-totumi) %>% arrange(desc(umi))
-df = merge(x=df,y=puckdf,all.x=T,by="sb_index")
 ################################################################################
 ### CREATE PDF #################################################################
 ################################################################################
@@ -340,22 +371,42 @@ make.pdf <- function(plots,name,w,h) {
   dev.off()
 }
 
+### Page 0: cell ranger output #################################################
+
+if (file.exists("RNAcounts/metrics_summary.csv")) {
+  plotdf = read.table("RNAcounts/metrics_summary.csv",header=F,comment.char="",sep=",") %>% t
+  rownames(plotdf) = NULL
+  plot = plot_grid(ggdraw()+draw_label(""),
+                   ggdraw()+draw_label("Cell Ranger Metrics Summary"),
+                   plot.tab(plotdf),
+                   ggdraw()+draw_label(""),
+                   ncol=1,rel_heights=c(0.1,0.1,0.7,0.2))
+  make.pdf(plot,"plots/0cellranger.pdf",7,8)
+}
+
 ### Page 1: cell calling #######################################################
 
-UvsI <- function() {
+UvsI <- function(obj) {
   fetch <- function(x){return(h5read(g("RNAcounts/molecule_info.h5"),x))}
   molecule_info = data.frame(barcode=fetch("barcodes")[fetch("barcode_idx")+1] %>% paste0("-1"),
                              feature=fetch("features/name")[fetch("feature_idx")+1],
                              umi=fetch("umi"),
                              umi_type=fetch("umi_type"),
-                             count=fetch("count"))
+                             reads=fetch("count"))
+  
+  nreads = sum(molecule_info$reads)
+  reads_cumsum = map(1:nrow(molecule_info), function(i){rep(i,molecule_info$reads[[i]])}) %>% flatten_int()
+  downsampling = map_int(seq(0,1,0.05),function(p){len(unique(sample(reads_cumsum,round(nreads*p),replace=F)))})
+  plotdf = data.frame(x=seq(0,1,0.05)*nreads/1000/1000,y=downsampling/1000/1000)
+  p0 = ggplot(plotdf, aes(x=x,y=y))+geom_line()+theme_bw()+xlab("Millions of reads")+ylab("Millions of filtered UMIs")+ggtitle("RNA Downsampling curve")
+  
   df = molecule_info %>% group_by(barcode) %>% summarize(umi=n(), pct.intronic=sum(umi_type==0)/umi) %>% arrange(desc(umi)) %>% mutate(logumi=log10(umi))
   
   p1 = df %>% filter(umi>50) %>% ggplot(aes(x = logumi, y = pct.intronic)) + 
     geom_bin2d(bins=100) +
     scale_fill_viridis(trans="log", option="A", name="density") + 
     theme_minimal() +
-    labs(title = "Intronic vs. UMI droplets (>50 umi)", x = "logumi", y = "%intronic")
+    labs(title = "Intronic vs. UMI droplets (>50 umi)", x = "logumi", y = "%intronic") & NoLegend()
   
   max_density_x = density(filter(df,umi>500,pct.intronic>0.3)$pct.intronic) %>% {.$x[which.max(.$y)]}
   p2 = df %>% filter(umi>500) %>% ggplot(aes(x = pct.intronic)) +
@@ -365,51 +416,47 @@ UvsI <- function() {
     geom_vline(xintercept = max_density_x, color = "red", linetype = "dashed") +
     annotate(geom = 'text', label = round(max_density_x, 2), x = max_density_x+0.01, y = Inf, hjust = 0, vjust = 1, col="red")
   
-  # p3 = data.frame(metric=c("#cells","mean logumi", "mean %MT"),value=c(ncol(obj) %>% round %>% as.integer,
-  #                                                          mean(obj$logumi) %>% round(2),
-  #                                                          mean(obj$percent.mt) %>% round(2))) %>% plot.tab
-
-  plot = plot_grid(p1,p2,ncol=1)
+  df %<>% mutate(index = 1:nrow(df),called=barcode%in%colnames(obj))
+  p3 = ggplot(df,aes(x=index,y=umi,col=called))+geom_line()+theme_bw()+scale_x_log10()+scale_y_log10()+
+    ggtitle("Barcode rank plot")+xlab("Barcodes")+ylab("UMI counts") +
+    theme(legend.position = c(0.05, 0.05), legend.justification = c("left", "bottom"), legend.background = element_blank(), legend.spacing.y = unit(0.1,"lines"))#, legend.title=element_text(size=10), legend.text=element_text(size=8), legend.margin=margin(0,0,0,0,"pt"), legend.box.margin=margin(0,0,0,0,"pt"), legend.key.size = unit(0.5, "lines"))
+  
+  plot = plot_grid(p3,p1,p0,p2,ncol=2)
   
   return(plot)
 }
 
-plot=UvsI()
-
-make.pdf(plot,"plots/1cellcalling.pdf",7,8)
-
+if (file.exists("RNAcounts/molecule_info.h5")) {
+  plot=UvsI(obj)
+  make.pdf(plot,"plots/1cellcalling.pdf",7,8)
+}
 
 ### Page 2: UMAP + metrics #####################################################
 
-plot = plot_grid(DimPlot(obj,label=T)+ggtitle(g("UMAP"))+NoLegend(),
-                 VlnPlot(obj,"logumi")+NoLegend(),
-                 FeaturePlot(obj,"percent.mt"),
-                 FeaturePlot(obj,"pct.intronic"),
+plot = plot_grid(DimPlot(obj,label=T)+ggtitle(g("UMAP"))+NoLegend()+theme(plot.title=element_text(hjust=0.5), axis.title.x=element_blank(), axis.title.y=element_blank())+coord_fixed(ratio=1),
+                 VlnPlot(obj,"logumi")+NoLegend()+theme(plot.title=element_text(hjust=0.5), axis.title.x=element_blank(), axis.title.y=element_blank()),
+                 FeaturePlot(obj,"percent.mt")+ggtitle("%MT")+theme(plot.title=element_text(hjust=0.5), axis.title.x=element_blank(), axis.title.y=element_blank())+coord_fixed(ratio=1),#+theme_classic(),#+theme(legend.key.width = unit(0.3, "cm"), plot.title=element_text(hjust=0.5)),
+                 FeaturePlot(obj,"pct.intronic")+ggtitle("%Intronic")+theme(plot.title=element_text(hjust=0.5), axis.title.x=element_blank(), axis.title.y=element_blank())+coord_fixed(ratio=1),#+theme_classic(),#+theme(legend.key.width = unit(0.3, "cm"), plot.title=element_text(hjust=0.5)),
                  ncol=2)
-
 make.pdf(plot,"plots/2umap.pdf",7,8)
 
 ### Page 3: FeaturePlots #####################################################
 
 plot = FeaturePlot(obj,c("MBP","PLP1","CSPG5","VCAN","AQP4","GFAP","FLT1","DCN","CX3CR1","GAD1", "GAD2", "RELN","SLC17A6","SLC17A7", "TH", "NR4A2"))&theme_void()+
-  theme(legend.key.width = unit(0.3, "cm"), plot.title=element_text(hjust=0.5)) & coord_fixed(ratio=1)
+  theme(legend.key.width=unit(0.3,"cm"), plot.title=element_text(hjust=0.5)) & coord_fixed(ratio=1)
 make.pdf(plot,"plots/3features.pdf",7,8)
 
 ### Page 4: Raw spatial data ###################################################
 
-cb.data = df %>% group_by(cb_index) %>% dplyr::summarize(unique.sb=n(),umi=sum(origumi)) %>% {.[order(.$umi,decreasing=T),]} %>% {mutate(.,index=1:nrow(.))}
-sb.data = df %>% group_by(sb_index) %>% dplyr::summarize(unique.cb=n(),umi=sum(origumi),x_um=mean(x_um),y_um=mean(y_um)) %>% {.[order(.$umi,decreasing=T),]} %>% {mutate(.,index=1:nrow(.))}
-sb.data_weighted = df %>% group_by(sb_index) %>% dplyr::summarize(unique.cb=n(),umi=sum(umi),x_um=mean(x_um),y_um=mean(y_um)) %>% {.[order(.$umi,decreasing=T),]} %>% {mutate(.,index=1:nrow(.))}
+p1 = umicurves[[1]]
+p2 = umicurves[[2]]
 
-p1 = ggplot(sb.data,aes(x=log10(index),y=log10(umi)))+rasterize(geom_point(size=0.5), dpi=200)+theme_bw()+ggtitle("SB UMI per bead")
-p2 = ggplot(cb.data,aes(x=log10(index),y=log10(umi)))+rasterize(geom_point(size=0.5), dpi=200)+theme_bw()+ggtitle("SB UMI per cell (called cells only)")
-
+reads = f("metadata/num_reads")
 x = seq(0,1,0.05)*reads/1000000
 
 plot.df = data.frame(x=x,y=f("metadata/downsampling")/1000000)
 p3 = ggplot(plot.df, aes(x=x,y=y))+geom_point()+theme_bw()+xlab("millions of reads")+ylab("millions of SB-whitelist UMIs")+ggtitle("Downsampling curve")
 
-reads = f("metadata/num_reads")
 plot.df = map(coords_list,function(df){return(df$DBSCAN_clusters %>% {c(sum(.==0),sum(.==1),sum(.==2))/nrow(df)*100})}) %>% {do.call(rbind,.)} %>% {rbind(c(0,0,0),.)}
 plot.df %<>% as.data.frame %>% setNames(c("0","1","2")) %>% mutate(x=x)
 plot.df = tidyr::gather(plot.df, key = "column", value = "value", -x)
@@ -421,6 +468,9 @@ plot = plot_grid(p1,p2,p3,p4,ncol=2)
 make.pdf(plot,"plots/4rawspatial.pdf",7,8)
 
 ### Page 5: Beadplot ###########################################################
+
+sb.data = df %>% group_by(sb_index) %>% dplyr::summarize(umi=sum(origumi),x_um=mean(x_um),y_um=mean(y_um)) %>% {.[order(.$umi,decreasing=T),]}
+sb.data_weighted = df %>% group_by(sb_index) %>% dplyr::summarize(umi=sum(umi),x_um=mean(x_um),y_um=mean(y_um)) %>% {.[order(.$umi,decreasing=T),]}
 
 beadplot <- function(sb.data, m, text){
   sb.data = sb.data[nrow(sb.data):1,]
@@ -447,16 +497,20 @@ p1 = ggplot(d,aes(x=x))+geom_histogram(aes(y = after_stat(count)/sum(after_stat(
 
 p2 = data.frame(x=obj$nCount_RNA,y=obj$num_SBumi,placed=!is.na(obj$x_um)) %>% {ggplot(.,aes(x=log10(x),y=log10(y),col=placed))+geom_point(size=0.2)+theme_bw()+xlab("RNA UMI")+ylab("SB UMI")+ggtitle("SB UMI vs. RNA UMI")+theme(legend.position = c(0.95, 0.05), legend.justification = c("right", "bottom"), legend.background = element_blank(), legend.title=element_text(size=10), legend.text=element_text(size=8), legend.margin=margin(0,0,0,0,"pt"), legend.box.margin=margin(0,0,0,0,"pt"), legend.spacing.y = unit(0.1,"lines"), legend.key.size = unit(0.5, "lines"))}
 
-# res = map(data.lists,opt_dbscan) %>% {do.call(rbind,.)} %>% as.data.frame %>% setNames(c("eps","minPts","%placement")) %>% mutate(quantile=round(quants[-1])) %>% select(c("SB UMI quantile","eps","minPts","pct"))
-# res %<>% mutate(pct = round(pct*100,2))
-# p2 = plot.tab(res)
+max_density_x = density(obj$SNR %>% na.omit) %>% {.$x[which.max(.$y)]}
+p3 = obj@meta.data %>% filter(!is.na(x_um)) %>% ggplot(aes(x = SNR)) +
+  geom_density() + 
+  theme_minimal() +
+  labs(title = "SNR density", x = "SNR", y = "Density") + 
+  geom_vline(xintercept = max_density_x, color = "red", linetype = "dashed") +
+  annotate(geom = 'text', label = round(max_density_x, 2), x = max_density_x+0.01, y = Inf, hjust = 0, vjust = 1, col="red")
 
-plot = plot_grid(p1,p2,ncol=1)
+plot = plot_grid(plot_grid(p1,p3,ncol=2),p2,ncol=1)
 make.pdf(plot,"plots/6DBSCAN.pdf",7,8)
 
 ### Page 7: Spatial ############################################################
 
-plot = plot_grid(DimPlot(obj,reduction="spatial")+coord_fixed(ratio=1)+ggtitle(g("{ncol(obj)} cells                %placed: {round(sum(!is.na(coords$x_um))/nrow(coords)*100,2)}")),
+plot = plot_grid(DimPlot(obj,reduction="spatial")+coord_fixed(ratio=1)+ggtitle(g("%placed: {round(sum(!is.na(coords$x_um))/nrow(coords)*100,2)} ({sum(!is.na(obj$x_um))})"))+NoLegend(),
                DimPlot(obj, reduction="spatial",split.by="seurat_clusters",ncol=6)&theme_void()&coord_fixed(ratio=1)&NoLegend(),
                ncol=1, rel_heights=c(1,1))
 
@@ -475,11 +529,6 @@ UP_matching = data.frame(type=f("metadata/UP_matching/type"),
 SBmatching = setNames(f("metadata/SB_matching/count"),f("metadata/SB_matching/type"))
 SB_matching = data.frame(type=f("metadata/SB_matching/type"),
                          count=f("metadata/SB_matching/count")) %>% arrange(desc(count)) %>% mutate(pct=round(count/sum(count)*100,2))
-
-# chimerastats = setNames(f("metadata/chimera_stats/count"),f("metadata/chimera_stats/type"))
-# chimera_stats = data.frame(type=c("reads_removed","umis_removed"),
-#                            count=c(chimerastats[["reads_before"]]-chimerastats[["reads_after"]],chimerastats[["umis_before"]]-chimerastats[["umis_after"]]))
-# chimera_stats$pct = round(chimera_stats$count/c(chimerastats[["reads_before"]],chimerastats[["umis_before"]])*100,2)
 
 CB_matching = data.frame(type=c("exact","HD1"),count=c(reads_before_cb_filter-reads_after_cb_filter_nofuzzy,reads_after_cb_filter-reads_after_cb_filter_nofuzzy)) %>% mutate(pct=round(count/sum(count)*100,2))
 
@@ -502,16 +551,9 @@ filterdf$pct.removed = round(filterdf$removed/(c(reads,reads-cumsum(filterdf$rem
 filterdf %<>% transmute(filter=filter,pct=pct.removed,pct.total=pct.total.removed)
 filterdf = rbind(filterdf, c("total",NA,sum(filterdf$pct.total)))
 
-# plot.tab(Rs)
-# plot.tab(UP_matching)
-# plot.tab(SB_matching)
-# plot.tab(chimera_stats)
-# plot.tab(metadata)
-# plot.tab(filterdf)
-
 metricplot = plot_grid(
           plot_grid(plot_grid(ggdraw()+draw_label("Metadata"),plot.tab(metadata),ncol=1,rel_heights=c(0.1,1)),
-                    plot_grid(ggdraw()+draw_label("Reads statistics"),plot.tab(filterdf),ncol=1,rel_heights=c(0.1,1)),
+                    plot_grid(ggdraw()+draw_label("Reads filtering"),plot.tab(filterdf),ncol=1,rel_heights=c(0.1,1)),
                     rel_widths=c(0.5,0.5), ncol=2),
           plot_grid(plot_grid(ggdraw()+draw_label("UP matching"),plot.tab(UP_matching),ncol=1,rel_heights=c(0.1,0.7)),
                     plot_grid(ggdraw()+draw_label("SB matching"),plot.tab(SB_matching),ggdraw()+draw_label("CB matching"),plot.tab(CB_matching),ncol=1,rel_heights=c(1,5,1,3)),
@@ -522,7 +564,7 @@ metricplot = plot_grid(
 make.pdf(metricplot,"plots/8metrics.pdf",7,8)
 
 ### Sample bead plots ##########################################################
-# 
+
 # cols = list(c("steelblue4","steelblue1"),c("red4","red1"),c("springgreen4","springgreen1"))
 # plot.sb <- function(subdf) {
 #   nlegend = min(4,max(subdf$cluster))
@@ -569,6 +611,6 @@ make.pdf(metricplot,"plots/8metrics.pdf",7,8)
 
 ### Save output ################################################################
 
-pdfs = c("1cellcalling.pdf", "2umap.pdf", "3features.pdf", "4rawspatial.pdf", "5beadplot.pdf", "6DBSCAN.pdf","7spatial.pdf","8metrics.pdf") %>% paste0("plots/",.)
+pdfs = c("0cellranger.pdf","1cellcalling.pdf", "2umap.pdf", "3features.pdf", "4rawspatial.pdf", "5beadplot.pdf", "6DBSCAN.pdf","7spatial.pdf","8metrics.pdf") %>% paste0("plots/",.)
 qpdf::pdf_combine(input = pdfs, output = "summary.pdf")
 
