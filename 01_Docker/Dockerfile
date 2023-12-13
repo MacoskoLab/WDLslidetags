@@ -6,7 +6,7 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends dstat moreutils zip less socat wget sudo curl gdebi-core && \
     apt-get install -y --no-install-recommends libfontconfig1-dev libharfbuzz-dev libfribidi-dev        && \
     apt-get install -y --no-install-recommends libfreetype6-dev libpng-dev libtiff5-dev libjpeg-dev     && \
-    apt-get install -y --no-install-recommends libcairo2-dev zlib1g libssl-dev libhdf5-dev
+    apt-get install -y --no-install-recommends libcairo2-dev zlib1g libssl-dev libhdf5-dev libxml2-dev
 
 # Install R
 RUN export R_VERSION=4.3.0 && \
