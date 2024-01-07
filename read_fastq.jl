@@ -3,7 +3,7 @@ using HDF5
 using FASTX
 using CodecZlib
 using IterTools: product
-using StatsBase: sample
+using StatsBase: countmap, sample
 using DataFrames
 using StringViews
 using LinearAlgebra: dot
@@ -14,13 +14,9 @@ if length(ARGS) != 2
     println("Usage: julia readfastq.jl fastqpath puckpath")
     @assert false
 end
-fastqpath = ARGS[1] ; println("FASTQS path: "*fastqpath)
-puckpath = ARGS[2] ; println("Puck path: "*puckpath)
-CBdictpath = "3M-february-2018.txt"
-
-@assert isdir(fastqpath)
-@assert isdir(puckpath)
-@assert isfile(CBdictpath)
+fastqpath = ARGS[1] ; println("FASTQs path: "*fastqpath) ; @assert isdir(fastqpath)
+puckpath = ARGS[2] ; println("Puck path: "*puckpath) ; @assert isdir(puckpath)
+CBdictpath = "3M-february-2018.txt" ; println("10X CB dictionary: "*CBdictpath) ; @assert isfile(CBdictpath)
 
 ################################################################################
 ##### Load the data ############################################################
@@ -31,11 +27,11 @@ fastqs = readdir(fastqpath,join=true)
 R1s = filter(s -> occursin("_R1_", s), fastqs) ; println("R1s: ", basename.(R1s))
 R2s = filter(s -> occursin("_R2_", s), fastqs) ; println("R2s: ", basename.(R2s))
 @assert length(R1s) == length(R2s) > 0
+@assert [replace(R1, "_R1_"=>"", count=1) for R1 in R1s] == [replace(R2, "_R2_"=>"", count=1) for R2 in R2s]
 
 # load the pucks
-pucks = readdir(puckpath,join=true)
-println("Pucks: ",basename.(pucks))
-puckdfs = [rename(CSV.read(puck, DataFrame, header=false),[:sb, :x, :y]) for puck in pucks]
+pucks = readdir(puckpath,join=true) ; println("Pucks: ",basename.(pucks))
+puckdfs = [rename(CSV.read(puck,DataFrame,header=false), [:sb,:x,:y]) for puck in pucks]
 SBwhitelist = Set{String15}()
 for (puck,puckdf) in zip(pucks,puckdfs)
     println("Loaded $(basename(puck)): $(nrow(puckdf)) spatial barcodes found")
@@ -47,11 +43,7 @@ for (puck,puckdf) in zip(pucks,puckdfs)
 end
 SBwhitelist = collect(SBwhitelist)
 println("Total SB: $(length(SBwhitelist))")
-
-# Load the CB remapping dictionary
-CBdf = CSV.File(CBdictpath, delim='\t', header=false) |> DataFrame
-CBremap = Dict(CBdf[!, 2] .=> CBdf[!, 1])
-empty!(CBdf)
+@assert length(SBwhitelist) < 2^32-1 "must change sb_i from UInt32 to UInt64"
 
 ################################################################################
 ##### Learn R1 and R2 ##########################################################
@@ -92,7 +84,7 @@ end
 ##### Create Whitelists ########################################################
 ################################################################################
 
-println("Creating matching dictionaries")
+print("Creating matching dictionaries... ")
 
 charlist = ['A','C','G','T','N']
 function listHDneighbors(str, hd)
@@ -137,7 +129,7 @@ GGseq = "GGGGGGGGGGGGGGGGGG"
 GGset = Set{String31}(reduce(union, [listHDneighbors(GGseq,i) for i in 0:3]))
 
 # store exact SB matches
-SBtoindex = Dict{Tuple{String15,String15},Int64}()
+SBtoindex = Dict{Tuple{String15,String15},UInt32}()
 for (i,sb) in enumerate(SBwhitelist)
     if !occursin('N',sb)
         SBtoindex[(sb[1:8],sb[9:14])] = i
@@ -145,7 +137,7 @@ for (i,sb) in enumerate(SBwhitelist)
 end
 
 # store fuzzy SB matches (==0 is ambiguous, >0 is unique, -1 is DNE)
-SBtoindexHD1 = Dict{Tuple{String15,String15},Int64}()
+SBtoindexHD1 = Dict{Tuple{String15,String15},UInt32}()
 for (i,sb) in enumerate(SBwhitelist)
     if !occursin('N',sb)
         for sb_f in listHDneighbors(sb,1)
@@ -166,31 +158,19 @@ for (i,sb) in enumerate(SBwhitelist)
         println("Too many N: ",sb)
     end
 end
-
-################################################################################
-##### Define key functions #####################################################
-################################################################################
-
-bases = ['A','C','T','G']
-
-# CB compressing (between 0x00000000 and 0xffffffff)
-p16 = [convert(UInt32,4^i) for i in 0:15]
-function CBtoindex(CB::StringView{SubArray{UInt8, 1, Vector{UInt8}, Tuple{UnitRange{Int64}}, true}})::UInt32
-    return(dot(p16, (codeunits(CB).>>1).&3))
-end
-function indextoCB(i::UInt32)::String31
-    return(String31(String([bases[(i>>n)&3+1] for n in 0:2:30])))
-end
+println("Done")
 
 # UMI compressing (between 0x00000000 and 0x00ffffff)
 p12 = [convert(UInt32,4^i) for i in 0:11]
 function UMItoindex(UMI::StringView{SubArray{UInt8, 1, Vector{UInt8}, Tuple{UnitRange{Int64}}, true}})::UInt32
     return(dot(p12, (codeunits(UMI).>>1).&3))
 end
-function indextoUMI(i::UInt32)::String15
-    return(String15(String([bases[(i>>n)&3+1] for n in 0:2:22])))
-end
+# bases = ['A','C','T','G']
+# function indextoUMI(i::UInt32)::String15
+#     return(String15(String([bases[(i>>n)&3+1] for n in 0:2:22])))
+# end
 
+# Pass in R2, get back an index into SBwhitelist
 function R2process(r2::StringView{SubArray{UInt8, 1, Vector{UInt8}, Tuple{UnitRange{Int64}}, true}})::Int64
     if r2[9:26]==UPseq # exact match
         sb1=r2[1:8]; sb2=r2[27:32]; m["-"]+=1
@@ -231,109 +211,103 @@ end
 ##### Read the FASTQS ##########################################################
 ################################################################################
 
-println("Reading FASTQS")
+print("Reading FASTQS... ")
 
 reads = 0
 m = Dict("-"=>0,"-1X"=>0,"GG"=>0,"1D-"=>0,"1D-1X"=>0,"-1D"=>0,"-2X"=>0,"none"=>0,"R1lowQ"=>0)
 p = Dict("exact"=>0,"HD1"=>0,"HD1ambig"=>0,"none"=>0)
-mat = Dict{Tuple{UInt32, UInt32, Int64},Int64}()
+CBwhitelist = Dict{String31,UInt32}() ; CBnum = 0
+mat = Dict{Tuple{UInt32, UInt32, UInt32},UInt32}()
 for fastqpair in zip(R1s,R2s)
     it1 = fastqpair[1] |> open |> GzipDecompressorStream |> FASTQ.Reader;
     it2 = fastqpair[2] |> open |> GzipDecompressorStream |> FASTQ.Reader;
-
     for record in zip(it1, it2)
         r1 = FASTQ.sequence(record[1])
         r2 = FASTQ.sequence(record[2], 1:32)
         global reads += 1
 
-        occursin('N', r1) ? (m["R1lowQ"] += 1 ; continue) : nothing
+        occursin('N', r1[17:28]) ? (m["R1lowQ"] += 1 ; continue) : nothing
         
         sb_i = R2process(r2)
         sb_i>0 ? nothing : continue
         
-        cb_i = CBtoindex(r1[1:16])
+        cb_i = get(CBwhitelist, r1[1:16], 0)
+        if cb_i == 0
+            global CBnum += 1
+            CBwhitelist[r1[1:16]] = CBnum
+            cb_i = CBnum
+        end
+        
         umi_i = UMItoindex(r1[17:28])
-
         key = (cb_i,umi_i,sb_i)
         mat[key] = get(mat,key,0) + 1
     end
 end
-
 @assert reads == sum(values(m))
 @assert m["1D-"]+m["1D-1X"]+m["-"]+m["-1X"]+m["-1D"]+m["-2X"] == sum(values(p))
 @assert p["exact"]+p["HD1"] == sum(values(mat))
-
 empty!(SBtoindex)
 empty!(SBtoindexHD1)
-
-# Turn matrix into dataframe
-cblist = UInt32[]
-umilist = UInt32[]
-sblist = Int64[]
-readslist = Int64[]
-for ((cb, umi, sb), r) in mat
-    push!(cblist, cb)
-    push!(umilist, umi)
-    push!(sblist, sb)
-    push!(readslist, r)
-end
-
-empty!(mat)
 GC.gc()
-
-df = DataFrame(cb = cblist, umi = umilist, sb = sblist, reads = readslist)
+println("Done")
 
 ################################################################################
 ##### Process the results ######################################################
 ################################################################################
 
-# # Remove chimeras (this is done later in R)
-# chimera_stats = Dict{String,Int64}()
-# chimera_stats["reads_before"]=sum(df.reads) ; chimera_stats["umis_before"]=nrow(df)
-# df = groupby(df, [:cb, :umi])
-# df = transform(df, :reads => (x -> x.==maximum(x)) => :ismax, ungroup=false)
-# df = transform(df, :ismax => (x -> sum(x)>1) => :toptie, ungroup=true)
-# df = filter(row -> row.ismax == true && row.toptie == false, df)
-# df = select(df, :cb, :umi, :sb, :reads)
-# chimera_stats["reads_after"]=sum(df.reads) ; chimera_stats["umis_after"]=nrow(df)
+print("Processing the results... ")
 
-# Change cb column from 2-bit encoding to index into list of all observed barcodes
-cbi_list = unique(df.cb) ; cb_dict = Dict{UInt32,Int64}(e=>i for (i,e) in enumerate(cbi_list))
-transform!(df, :cb => (x->[cb_dict[y] for y in x]) => :cb)
-sort!(df, :reads, rev=true)
+# Turn matrix into dataframe
+df = DataFrame(cb = UInt32[], umi = UInt32[], sb = UInt32[], reads = UInt32[])
+for (key,value) in zip(keys(mat),values(mat))
+     push!(df, (key[1],key[2],key[3],value))
+end
+empty!(mat)
+GC.gc()
 
-# Remap cell barcodes from 2-bit encoding to nucleotide sequence
-cb_list = Vector{String31}([indextoCB(cbi) for cbi in cbi_list])
-cb_list_remap = Vector{String31}([get(CBremap,cb,"") for cb in cb_list])
+# Turn CB whitelist into a dataframe and sort
+CBwhitelist_df = DataFrame(cb = collect(String31,keys(CBwhitelist)), cb_i = collect(UInt32, values(CBwhitelist)))
+empty!(CBwhitelist)
+sort!(CBwhitelist_df, :cb_i)
+GC.gc()
 
-# Convert to 32-bit integers (cuts down on size - can skip if need more room)
-@assert maximum(df.cb) < 2^32-1
-@assert maximum(df.sb) < 2^32-1
-@assert maximum(df.reads) < 2^32-1
-df.cb = convert.(Int32, df.cb)
-df.sb = convert.(Int32, df.sb)
-df.reads = convert.(Int32, df.reads)
+# Remap the cell barcodes
+CBdf = CSV.File(CBdictpath, delim='\t', header=false) |> DataFrame
+@assert size(CBdf) == (6794880, 2)
+CBremap = Dict(CBdf[!, 2] .=> CBdf[!, 1])
+empty!(CBdf)
+CBwhitelist_df.cb_remap = [get(CBremap, cb, String31("")) for cb in CBwhitelist_df.cb]
+empty!(CBremap)
+GC.gc()
+
+# Concatenate the puck dataframes
+for (i,puckdf) in enumerate(puckdfs)
+    puckdf[!, :puck_index] = fill(UInt8(i), nrow(puckdf))
+end
+puckdf = vcat(puckdfs...)
+empty!(puckdfs)
+GC.gc()
 
 # Create a downsampling curve
-nreads = sum(df.reads)
-reads_cumsum = vcat([repeat([i], df.reads[i]) for i in 1:nrow(df)]...)
-downsampling = [length(Set([reads_cumsum[i] for i in sample(1:nreads, Int64(round(nreads*p)), replace=false)])) for p in 0:0.05:1]
+downsampling = UInt32[]
+table = countmap(df.reads)
+for prob in 0:0.05:1
+    s = [length(unique(floor.(sample(1:k*v, round(Int,k*v*prob), replace=false)/k))) for (k,v) in zip(keys(table),values(table))]
+    append!(downsampling,sum(s))
+end
+
+println("Done")
 
 ################################################################################
 ##### Save results #############################################################
 ################################################################################
 
-println("Saving Results")
-
-for (i,puckdf) in enumerate(puckdfs)
-    puckdf[!, :puck_index] = fill(UInt8(i), nrow(puckdf))
-end
-puckdf = vcat(puckdfs...)
+print("Saving Results... ")
 
 h5open("SBcounts.h5", "w") do file
     create_group(file, "lists")
-    file["lists/cb_list", compress=9] = cb_list
-    file["lists/cb_list_remap", compress=9] = cb_list_remap
+    file["lists/cb_list", compress=9] = CBwhitelist_df.cb
+    file["lists/cb_list_remap", compress=9] = CBwhitelist_df.cb_remap
     file["lists/sb_list", compress=9] = SBwhitelist
 
     create_group(file, "matrix")
@@ -354,7 +328,7 @@ h5open("SBcounts.h5", "w") do file
     file["metadata/R1s"] = R1s
     file["metadata/R2s"] = R2s
     file["metadata/switch"] = convert(Int8, switch)
-    file["metadata/num_reads"] = reads
+    file["metadata/num_reads"] = convert(Int64, sum(df.reads))
 
     create_group(file, "metadata/UP_matching")
     file["metadata/UP_matching/type"] = keys(m) |> collect
@@ -363,10 +337,6 @@ h5open("SBcounts.h5", "w") do file
     create_group(file, "metadata/SB_matching")
     file["metadata/SB_matching/type"] = keys(p) |> collect
     file["metadata/SB_matching/count"] = values(p) |> collect
-
-    # create_group(file, "metadata/chimera_stats")
-    # file["metadata/chimera_stats/type"] = keys(chimera_stats) |> collect
-    # file["metadata/chimera_stats/count"] = values(chimera_stats) |> collect
     
     file["metadata/downsampling"] = downsampling
 end;
@@ -378,7 +348,7 @@ println("Done")
 ################################################################################
 
 # The workflow for processing the FASTQs is as follows:
-#   1) throw out reads that have an N in read 1, which contains the cb (cell barcode) and umi (unique molecular identifier)
+#   1) throw out reads that have an N in the umi
 #   2) throw out reads that don't have a detectable UP site
 #      - UP site does fuzzy matching - allows 1 deletion or up to 2 mismatches
 #      - this is implemented by a few Set() objects made in advance that contain all possible fuzzy matches
@@ -386,9 +356,6 @@ println("Done")
 #      - allow fuzzy matching with either 1 mismatch or 1 deletion
 #   4) dictionary update
 #      - for reads that made it this far, the (cb,umi,sb) key of the dictionary will be incremented by 1
-#      - cb and umi are 2-bit encoded
-#      - sb is stored as an index into the SBwhitelist vector
+#      - umi is 2-bit encoded
+#      - cb,sb is stored as an index into the CBwhitelist,SBwhitelist vector
 # The final result of the FASTQ reading step is a dictionary, where the keys are encoded (cb, umi, sb) and the values are the number of reads
-#   5) convert the dictionary to a dataframe
-#   6) turn the 2-bit encoded cell barcodes into native and remapped barcode sequences
-#   7) generate the .h5 file, which contains the count matrix and various metadata
