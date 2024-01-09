@@ -292,7 +292,7 @@ GC.gc()
 downsampling = UInt32[]
 table = countmap(df.reads)
 for prob in 0:0.05:1
-    s = [length(unique(floor.(sample(1:k*v, round(Int,k*v*prob), replace=false)/k))) for (k,v) in zip(keys(table),values(table))]
+    s = [length(unique(floor.(sample(0:k*v-1, round(Int,k*v*prob), replace=false)/k))) for (k,v) in zip(keys(table),values(table))]
     append!(downsampling,sum(s))
 end
 
