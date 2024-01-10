@@ -65,7 +65,7 @@ print(f"FASTQS exist: {checkgsfile(f'gs://{bucket}/02_FASTQS/{bcl}')}")
 print(f"COUNTS exist: {checkgsfile(f'gs://{bucket}/03_COUNTS/{bcl}')}")
 
 # Load the worksheets
-gspread_client = gspread.service_account(filename="upload_for_google_key.json")
+gspread_client = gspread.service_account(filename="google_key.json")
 spreadsheet = gspread_client.open("Slide-Tags Experiment Log")
 
 # Search for the BCL in the spreadsheet
