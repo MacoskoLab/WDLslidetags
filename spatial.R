@@ -489,6 +489,7 @@ print("Making summary.pdf")
 system("mkdir plots")
 
 fetch <- function(x){return(h5read("RNAcounts/molecule_info.h5",x))}
+gdraw <- function(text,s=14) {ggdraw()+draw_label(text,size=s)}
 plot.tab <- function(df) {return(plot_grid(tableGrob(df)))}
 make.pdf <- function(plots,name,w,h) {
   if (any(class(plots)=="gg")||class(plots)=="Heatmap") {plots=list(plots)}
@@ -565,7 +566,7 @@ UvsI <- function(obj) {
   # Panel 4: cell barcode knee plot
   df %<>% mutate(index=1:nrow(df), called=barcodes[barcode+1]%in%cb_whitelist)
   p3 = ggplot(df,aes(x=index,y=umi,col=called))+geom_line()+theme_bw()+scale_x_log10()+scale_y_log10()+
-    ggtitle("Barcode rank plot")+xlab("Barcodes")+ylab("UMI counts") +
+    ggtitle("Barcode rank plot")+xlab("Cell barcodes")+ylab("UMI counts") +
     theme(legend.position = c(0.05, 0.05), legend.justification = c("left", "bottom"), legend.background = element_blank(), legend.spacing.y = unit(0.1,"lines"))#, legend.title=element_text(size=10), legend.text=element_text(size=8), legend.margin=margin(0,0,0,0,"pt"), legend.box.margin=margin(0,0,0,0,"pt"), legend.key.size = unit(0.5, "lines"))
   
   plot = plot_grid(p3,p1,p0,p2,ncol=2)
@@ -598,7 +599,7 @@ p2 = umicurves[[2]]
 # Panel 3: Downsampling UMI
 x = seq(0,1,0.05)*f("metadata/num_reads")/1000000
 plot.df = data.frame(x=x,y=f("metadata/downsampling")/1000000)
-p3 = ggplot(plot.df, aes(x=x,y=y))+geom_point()+theme_bw()+xlab("Reads (millions)")+ylab("SB-whitelist UMIs (millions)")+ggtitle("Downsampling curve")
+p3 = ggplot(plot.df, aes(x=x,y=y))+geom_point()+theme_bw()+xlab("Millions of reads")+ylab("Millions of filtered SB UMIs")+ggtitle("Downsampling curve")
 
 # Panel 4: Downsampling placement
 plot.df = map(coords_list,function(df){return(df$DBSCAN_clusters %>% {c(sum(.==0),sum(.==1),sum(.>=2))/nrow(df)*100})}) %>% {do.call(rbind,.)} %>% {rbind(c(0,0,0),.)}
@@ -611,7 +612,7 @@ rmse = coords_list %>% head(-1) %>% map_dbl(function(coord){
   df = merge(mastercoord,coord,by="cb")
   df %<>% filter(!is.na(x1),!is.na(x2))
   df %<>% mutate(dist=sqrt((x2-x1)^2+(y2-y1)^2))
-  return(mean(df$dist))
+  return(median(df$dist))
 }) %>% {c(NA,.,NA)}
 #plot.df2 = data.frame(x=x,rmse=rmse)
 m1 = max(plot.df$value, na.rm=T)
@@ -624,7 +625,7 @@ p4 <- ggplot(plot.df,aes(x=x, y=value, color=column)) + geom_line() +
   #geom_line(data=plot.df, aes(x=x, y=value, color=column)) + 
   #geom_line(data=plot.df2, aes(x=x, y=rmse, color="grey"), col="grey") +
   scale_color_manual(values = c("#F8766D", "#00BA38", "#619CFF", "grey")) +
-  scale_y_continuous(sec.axis = sec_axis(~ . * m2/m1, name = "average displacement (µm)")) +
+  scale_y_continuous(sec.axis = sec_axis(~ . * m2/m1, name = "median displacement (µm)")) +
   labs(title = "Downsampling Placements", x = "Reads (millions)", y = "Percent placed", color = "") +
   theme(legend.position=c(0.85, 0.85), legend.background=element_blank(), legend.key=element_blank(), legend.key.height=unit(0.75, "lines"))
 
@@ -669,7 +670,7 @@ max_density_x = density(obj$SNR %>% na.omit) %>% {.$x[which.max(.$y)]}
 p2 = obj@meta.data %>% filter(!is.na(x_um)) %>% ggplot(aes(x = SNR)) +
   geom_density() + 
   theme_minimal() +
-  labs(title = "SNR density", x = "SNR", y = "Density") + 
+  labs(title = "SNR per cell (density)", x = "SNR", y = "Density") + 
   geom_vline(xintercept = max_density_x, color = "red", linetype = "dashed") +
   annotate(geom = 'text', label = round(max_density_x, 2), x = max_density_x+0.01, y = Inf, hjust = 0, vjust = 1, col="red")
 
@@ -679,7 +680,7 @@ p3 = data.frame(x=obj$nCount_RNA,y=obj$num_SBumi,placed=!is.na(obj$x_um)) %>% {g
 # Panel 4: DBSCAN parameters
 df = coords %>% select(SB_bin,minPts,eps,pct.placed) %>% distinct %>% arrange(SB_bin) %>% mutate(SB_bin=round(SB_bin,2),pct.placed=round(pct.placed,2) %>% paste0("%"))
 rownames(df) <- NULL
-p4 = plot.tab(df)
+p4 = plot_grid(gdraw("DBSCAN parameters"),plot.tab(df),ncol=1,rel_heights=c(1,17))
 
 plot = plot_grid(p1,p2,p3,p4,ncol=2)
 make.pdf(plot,"plots/6DBSCAN.pdf",7,8)
@@ -787,7 +788,5 @@ make.pdf(list(p1,p2,p3),"plots/SB.pdf",7,7)
 pdfs = c("0cellranger.pdf","1cellcalling.pdf", "2umap.pdf", "4rawspatial.pdf", "5beadplot.pdf", "6DBSCAN.pdf","7spatial.pdf","9metrics.pdf","SB.pdf") %>% paste0("plots/",.)
 qpdf::pdf_combine(input = pdfs, output = "summary.pdf")
 qsave(obj, "seurat.qs") # we added some more metadata while plotting
-
-# Adjust origumi and umi_corrected
 
 print("Done!")
