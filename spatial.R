@@ -8,8 +8,10 @@ library(ggplot2)
 library(cowplot)
 library(viridis)
 library(ggrastr)
+library(stringr)
 library(Seurat)
 library(dbscan)
+library(future)
 library(rlist)
 library(dplyr)
 library(purrr)
@@ -18,7 +20,16 @@ library(rhdf5)
 library(qpdf)
 library(qs)
 
-# setwd("~/SBcounts/317/")
+# setwd("~/SBcounts/3100/")
+
+# RNApath = "gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/03_COUNTS/230317_SL-NSA_0564_AHVCHWDRX2/SI-TT-E11"
+# SBpath = "gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/04_SPATIAL/230317_SL-NSA_0564_AHVCHWDRX2/SI-NT-C4"
+
+# RNApath = "gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/03_COUNTS/231020_VL00181_99_AAF2KJGM5/SI-TS-A11"
+# SBpath = "gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/04_SPATIAL/231020_VL00181_99_AAF2KJGM5/SI-TT-A1"
+
+# RNApath = "gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/03_COUNTS/230310_SL-NVN_0914_AHCWK5DSX5/SI-TT-D5"
+# SBpath = "gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/04_SPATIAL/230310_SL-NVN_0914_AHCWK5DSX5/SI-NT-D5"
 
 ### Download files #############################################################
 
@@ -30,12 +41,6 @@ if (length(args) != 2) {
 RNApath <- args[1] ; print(g("RNApath: {RNApath}"))
 SBpath <- args[2] ; print(g("SBpath: {SBpath}"))
 
-# RNApath = "gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/03_COUNTS/230317_SL-NSA_0564_AHVCHWDRX2/SI-TT-E11"
-# SBpath = "gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/04_SPATIAL/230317_SL-NSA_0564_AHVCHWDRX2/SI-NT-C4"
-
-# RNApath = "gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/03_COUNTS/231020_VL00181_99_AAF2KJGM5/SI-TS-A11"
-# SBpath = "gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/04_SPATIAL/231020_VL00181_99_AAF2KJGM5/SI-TT-A1"
-
 stopifnot(!file.exists("RNAcounts"))
 stopifnot(!file.exists("SBcounts"))
 
@@ -43,16 +48,16 @@ checkgsfile <- function(path) {return(system(g("gsutil ls {path}"),intern=F,igno
 
 system("mkdir RNAcounts")
 if (checkgsfile(file.path(RNApath,"outs/filtered_feature_bc_matrix.h5"))) {
-  RNAtech = "count"
+  RNAtech = "cellranger count"
   system(g("gsutil cp {RNApath}/outs/filtered_feature_bc_matrix.h5 RNAcounts"))
   system(g("gsutil cp {RNApath}/outs/raw_feature_bc_matrix.h5 RNAcounts"))
   system(g("gsutil cp {RNApath}/outs/molecule_info.h5 RNAcounts"))
   system(g("gsutil cp {RNApath}/outs/metrics_summary.csv RNAcounts"))
 } else if (checkgsfile(file.path(RNApath,"outs/multi"))) {
-  RNAtech = "multi"
+  RNAtech = "cellranger multi"
   system(g("gsutil cp {RNApath}/outs/multi/count/raw_feature_bc_matrix.h5 RNAcounts"))
-  system(g("gsutil cp {RNApath}/outs/per_sample_outs/{basename(RNApath)}/count/sample_filtered_feature_bc_matrix.h5 RNAcounts/filtered_feature_bc_matrix.h5 RNAcounts"))
-  system(g("gsutil cp {RNApath}/outs/per_sample_outs/{basename(RNApath)}/count/sample_molecule_info.h5 RNAcounts/molecule_info.h5 RNAcounts"))
+  system(g("gsutil cp {RNApath}/outs/per_sample_outs/{basename(RNApath)}/count/sample_filtered_feature_bc_matrix.h5 RNAcounts/filtered_feature_bc_matrix.h5"))
+  system(g("gsutil cp {RNApath}/outs/per_sample_outs/{basename(RNApath)}/count/sample_molecule_info.h5 RNAcounts/molecule_info.h5"))
   system(g("gsutil cp {RNApath}/outs/per_sample_outs/{basename(RNApath)}/metrics_summary.csv RNAcounts"))
 } else {
   print("Unknown RNA directory structure, exiting...")
@@ -96,116 +101,200 @@ obj %<>% Seurat::NormalizeData() %>%
 # Add %intronic
 if (file.exists("RNAcounts/molecule_info.h5")) {
   fetch <- function(x){return(h5read("RNAcounts/molecule_info.h5",x))}
-  info = data.frame(barcode=fetch("barcodes")[fetch("barcode_idx")+1] %>% paste0("-1"),
-                             feature=fetch("features/name")[fetch("feature_idx")+1],
+  barcodes = fetch("barcodes")
+  info = data.frame(barcode=fetch("barcode_idx")+1,
+                             feature=fetch("feature_idx")+1,
                              umi=fetch("umi"),
                              umi_type=fetch("umi_type"))
   info %<>% group_by(barcode) %>% summarize(numi=n(), pct.intronic=sum(umi_type==0)/numi)
-  obj$pct.intronic = info$pct.intronic[match(colnames(obj),info$barcode)] * 100
-  rm(info) ; rm(fetch)
+  obj$pct.intronic = info$pct.intronic[match(obj$cb,barcodes[info$barcode])] * 100
+  rm(info) ; rm(fetch) ; rm(barcodes)
 }
 
 cb_whitelist = unname(obj$cb)
+stopifnot(!duplicated(cb_whitelist))
+stopifnot(len(unique(nchar(cb_whitelist)))==1)
+stopifnot(map_lgl(strsplit(cb_whitelist,""),~all(.%in%c("A","C","G","T"))))
+
+Misc(obj, "method") <- RNAtech ; rm(RNAtech)
+Misc(obj, "called_cells") <- len(cb_whitelist)
+Misc(obj, "RNA_reads") <- sum(obj$nCount_RNA)
+Misc(obj, "RNApath") <- RNApath ; rm(RNApath)
+Misc(obj, "SBpath") <- SBpath ; rm(SBpath)
+
+gc()
 
 ### Load the SB counts matrix ##################################################
 
 # Accessor method for the spatial .h5
 f <- function(p){return(h5read("SBcounts/SBcounts.h5",p))}
 
-cb_list = f("lists/cb_list")
-cb_list_remap = f("lists/cb_list_remap")
-sb_list = f("lists/sb_list")
-
+# Load the SB count matrix
 df = data.frame(cb_index=f("matrix/cb_index"),
                 umi_2bit=f("matrix/umi"),
                 sb_index=f("matrix/sb_index"),
                 reads=f("matrix/reads"))
+cb_list = f("lists/cb_list") ; stopifnot(!any(duplicated(cb_list)))
+sb_list = f("lists/sb_list") ; stopifnot(!any(duplicated(sb_list)))
 
-# Remap the whitelist (if necessary)
+# Determine the whitelist remap status
+cb_list_remap = f("lists/cb_list_remap")
 reads_noremap = df %>% filter(cb_list[cb_index] %in% cb_whitelist) %>% pull(reads) %>% sum
 reads_remap = df %>% filter(cb_list_remap[cb_index] %in% cb_whitelist) %>% pull(reads) %>% sum
-remap = reads_remap > reads_noremap ; rm(reads_remap) ; rm(reads_noremap)
-if (remap) {
-  cb_dict <- read.table(CBdictpath) %>% {setNames(.[[2]],.[[1]])}
-  print("Remapping CB whitelist")
-  cb_whitelist = cb_dict[cb_whitelist]
-}
-stopifnot(!duplicated(cb_whitelist))
+remap = reads_remap > reads_noremap
+rm(reads_remap) ; rm(reads_noremap) ; rm(cb_list_remap)
 
-reads_after_cb_filter_nofuzzy = df %>% mutate(cb=cb_list[cb_index]) %>% filter(cb %in% cb_whitelist) %>% pull(reads) %>% sum
+# Remap the whitelist
+if (remap) {
+  print("Remapping CB whitelist")
+  cb_dict <- read.table(CBdictpath) %>% {setNames(.[[2]],.[[1]])}
+  stopifnot(cb_whitelist %in% names(cb_dict))
+  cb_whitelist = cb_dict[cb_whitelist] %>% unname
+  stopifnot(!duplicated(cb_whitelist))
+} ; rm(CBdictpath)
+
+# Add metadata to the seurat object
+Misc(obj, "R1s") <- f("metadata/R1s")
+Misc(obj, "R2s") <- f("metadata/R2s")
+Misc(obj, "switchR1R2") <- f("metadata/switch") %>% as.logical
+Misc(obj, "remapCB") <- remap
+Misc(obj, "UP_matching_type") <- f("metadata/UP_matching/type")
+Misc(obj, "UP_matching_count") <- f("metadata/UP_matching/count")
+Misc(obj, "SB_matching_type") <- f("metadata/SB_matching/type")
+Misc(obj, "SB_matching_count") <- f("metadata/SB_matching/count")
+Misc(obj, "SB_reads") <- f("metadata/num_reads")
+Misc(obj, "SB_reads_filtered") <- sum(df$reads)
+
+gc()
 
 # Perform the HD1 matching between observed cell barcodes and the whitelist
-chunk_size = round(50000000/len(cb_whitelist))
-chunk_vector <- function(v, chunk_size) {return(split(v, ceiling(seq_along(v) / chunk_size)))}
-res = lapply(chunk_vector(cb_list,chunk_size), function(chunk){
-  dists=stringdist::stringdistmatrix(chunk, cb_whitelist, method = "hamming")
-  row0s = rowSums(dists == 0)
-  row1s = rowSums(dists == 1)
-  m = (row0s==1) | (row1s==1)
-  mins = apply(dists[m,],1,function(row){which.min(row)})
-  return(list(which(m),mins))
-})
-matching_dict = setNames( # keys are cb_list_index, values are cb_whitelist_index
-  map(res,pluck(2)) %>% flatten_int,
-  map(res,pluck(1)) %>% map2(1:length(res),~.x+chunk_size*(.y-1)) %>% flatten_int
-)
-stopifnot(!duplicated(names(matching_dict)))
-rm(res) ; rm(chunk_size)
+listHD1neighbors <- function(input_string) {
+  nucleotides <- c('A','C','G','T')
+  result <- c()
+  for (i in 1:nchar(input_string)) {
+    current_char <- substr(input_string, i, i)
+    for (nuc in nucleotides) {
+      if (nuc != current_char) {
+        new_string <- paste0(substr(input_string, 1, i - 1), nuc, substr(input_string, i + 1, nchar(input_string)))
+        result <- c(result, new_string)
+      }
+    }
+  }
+  return(result)
+}
 
-# Convert cb_index from an index into cb_list to an index into cb_whitelist
-df %<>% mutate(cb_whitelist_index=matching_dict[as.character(cb_index)], cb_index=ifelse(is.na(cb_whitelist_index),-cb_index,cb_whitelist_index)) %>% select(-cb_whitelist_index)
-rm(matching_dict) ; rm(cb_list) ; rm(cb_list_remap)
+print("Performing HD1 CB fuzzy matching")
 
-# compress duplicate rows introduced by fuzzy matching
-df %<>% group_by(cb_index, umi_2bit, sb_index) %>% summarize(reads = sum(reads)) %>% ungroup %>% as.data.frame %>% arrange(desc(reads))
+exact_dict = match(cb_list, cb_whitelist)
+
+neighbors = map(cb_whitelist,listHD1neighbors) %>% flatten_chr
+originals = map(1:len(cb_whitelist),~rep(.,nchar(cb_whitelist[[1]])*3)) %>% flatten_int
+m = is.na(match(neighbors, cb_list)) ; neighbors=neighbors[!m] ; originals=originals[!m] ; rm(m)
+HD1ambig = unique(neighbors[duplicated(neighbors)])
+m = neighbors%in%HD1ambig ; neighbors=neighbors[!m] ; originals=originals[!m] ; rm(m)
+stopifnot(!any(duplicated(neighbors)))
+fuzzy_dict = originals[match(cb_list, neighbors)]
+rm(neighbors) ; rm(originals)
+# stopifnot(table(!is.na(fuzzy_dict),!is.na(exact_dict))["TRUE","TRUE"] == 0) # exact and fuzzy matches should be distinct
+
+df %<>% mutate(exact = exact_dict[cb_index], HD1 = fuzzy_dict[cb_index])
+rm(exact_dict) ; rm(fuzzy_dict)
+
+Misc(obj, "SB_reads_filtered_exact") <- df %>% filter(!is.na(exact)) %>% pull(reads) %>% sum
+Misc(obj, "SB_reads_filtered_HD1") <- df %>% filter(!is.na(HD1)) %>% pull(reads) %>% sum
+Misc(obj, "SB_reads_filtered_HD1ambig") <- df %>% filter(cb_index %in% match(HD1ambig,cb_list)) %>% pull(reads) %>% sum
+rm(cb_list) ; rm(HD1ambig)
+gc()
+# stopifnot(table(!is.na(df$exact),!is.na(df$HD1))["TRUE","TRUE"] == 0) # exact and fuzzy matches should be distinct
+
+# Remove duplicate rows introduced by fuzzy matching
+df1 = df %>% filter(!is.na(exact)) %>% mutate(cb_index = exact) %>% select(1:4)
+df2 = df %>% filter(!is.na(HD1)) %>% mutate(cb_index = HD1) %>% select(1:4)
+df3 = df %>% filter(is.na(exact)&is.na(HD1)) %>% mutate(cb_index = -cb_index) %>% select(1:4)
+
+df2 %<>% group_by(cb_index, umi_2bit, sb_index) %>% summarize(reads=sum(reads)) %>% ungroup
+
+df12 <- full_join(df1, df2, by = c("cb_index","umi_2bit","sb_index")) ; rm(df1) ; rm(df2)
+df12$reads.x %<>% tidyr::replace_na(0) ; df12$reads.y %<>% tidyr::replace_na(0)
+df12 %<>% mutate(reads=reads.x+reads.y) %>% select(-reads.x,-reads.y)
+
+df = rbind(df12, df3) ; rm(df12) ; rm(df3) ; gc()
 
 # Remove chimeric reads
-df %<>% group_by(cb_index,umi_2bit) %>% mutate(ismax = reads==max(reads), toptie = sum(ismax)>1) %>% ungroup
-reads_before_chimera_filter = sum(df$reads)
-df %<>% filter(ismax==T & toptie == F) %>% select(-ismax,-toptie)
-reads_after_chimera_filter = sum(df$reads)
+print("Removing chimeras")
+df %<>% arrange(cb_index,umi_2bit,desc(reads))
+before_same = tidyr::replace_na(df$cb_index==lag(df$cb_index) & df$umi_2bit==lag(df$umi_2bit), FALSE) 
+after_same = tidyr::replace_na(df$cb_index==lead(df$cb_index) & df$umi_2bit==lead(df$umi_2bit) & df$reads==lead(df$reads), FALSE)
+chimeric = before_same | after_same
+
+Misc(obj, "SB_reads_chimeric") <- df[chimeric,]$reads %>% sum
+df = df[!chimeric,] ; rm(chimeric, before_same, after_same)
+
+Misc(obj, "SB_reads_called") <- df %>% filter(cb_index>0) %>% pull(reads) %>% sum
+Misc(obj, "SB_reads_uncalled") <- df %>% filter(cb_index<0) %>% pull(reads) %>% sum
 
 # remap the whitelist back
 if (remap) {
   cb_whitelist = cb_dict[cb_whitelist] %>% unname
+  stopifnot(!duplicated(cb_whitelist))
   rm(cb_dict)
 }
-stopifnot(!duplicated(cb_whitelist))
+
+gc()
+
+count_umis <- function(df) {
+  # This method implements the following logic, except faster and more memory efficient:
+  # df %<>% group_by(cb_index, sb_index) %>% summarize(umi=n()) 
+  
+  gdf = df %>% select(cb_index,sb_index) %>% arrange(cb_index, sb_index) 
+  bnds = (gdf$cb_index!=lead(gdf$cb_index) | gdf$sb_index!=lead(gdf$sb_index)) %>% tidyr::replace_na(T) %>% which
+  gdf %<>% distinct()
+  gdf$umi = (bnds - lag(bnds)) %>% tidyr::replace_na(bnds[[1]]) ; rm(bnds)
+  
+  gdf %<>% arrange(desc(umi))
+
+  return(gdf)
+}
 
 # Make a plot of the distributions
 plotSBumicurves <- function(df) {
-  df %<>% group_by(cb_index,sb_index) %>% summarize(umi=n()) %>% ungroup %>% arrange(desc(umi))
-  cb.data = df %>% group_by(cb_index) %>% dplyr::summarize(umi=sum(umi)) %>% {.[order(.$umi,decreasing=T),]} %>% {mutate(.,index=1:nrow(.),filter="all cell barcodes")}
-  sb.data = df %>% group_by(sb_index) %>% dplyr::summarize(umi=sum(umi)) %>% {.[order(.$umi,decreasing=T),]} %>% {mutate(.,index=1:nrow(.),filter="all cell barcodes")}
+  gdf = count_umis(df)
   
-  df %<>% filter(cb_index > 0)
-  cb.data2 = df %>% group_by(cb_index) %>% dplyr::summarize(umi=sum(umi)) %>% {.[order(.$umi,decreasing=T),]} %>% {mutate(.,index=1:nrow(.),filter="called cell barcodes only")}
-  sb.data2 = df %>% group_by(sb_index) %>% dplyr::summarize(umi=sum(umi)) %>% {.[order(.$umi,decreasing=T),]} %>% {mutate(.,index=1:nrow(.),filter="called cell barcodes only")}
+  cb.data = gdf %>% group_by(cb_index) %>% dplyr::summarize(umi=sum(umi)) %>% arrange(desc(umi)) %>% {mutate(.,index=1:nrow(.),filter="all cell barcodes")}
+  cb.data2 = cb.data %>% filter(cb_index>0) %>% {mutate(.,index=1:nrow(.),filter="called cell barcodes only")}
+  sb.data = gdf %>% group_by(sb_index) %>% dplyr::summarize(umi=sum(umi)) %>% arrange(desc(umi)) %>% {mutate(.,index=1:nrow(.),filter="all cell barcodes")}
+  sb.data2 = gdf %>% filter(cb_index > 0) %>% group_by(sb_index) %>% dplyr::summarize(umi=sum(umi)) %>% arrange(desc(umi)) %>% {mutate(.,index=1:nrow(.),filter="called cell barcodes only")}
   
-  p1 = rbind(sb.data, sb.data2) %>% ggplot(aes(x=index,y=umi,col=filter))+geom_line()+
+  sb_pct_in_called_cells = round(sum(filter(cb.data,cb_index>0)$umi)/sum(cb.data$umi)*100,2)
+  
+  p1 = ggplot(mapping=aes(x=index, y=umi,col=filter))+geom_line(data=cb.data)+geom_line(data=cb.data2) +
+    scale_x_log10()+scale_y_log10()+theme_bw()+ggtitle("SB UMI per cell")+ylab("SB UMI counts")+xlab("Cell barcodes") +
+    theme(legend.position = c(0.05, 0.05), legend.justification = c("left", "bottom"), legend.background = element_blank(), legend.spacing.y = unit(0.1,"lines")) +
+    annotate("text", x = Inf, y = Inf, label = g("SB UMI in called cells: {sb_pct_in_called_cells}%"), hjust = 1, vjust = 1.3)
+  
+  p2 = ggplot(mapping=aes(x=index,y=umi,col=filter))+geom_line(data=sb.data)+geom_line(data=sb.data2)+
     scale_x_log10()+scale_y_log10()+theme_bw()+ggtitle("SB UMI per bead")+ylab("SB UMI counts")+xlab("Beads")+
     theme(legend.position = c(0.05, 0.05), legend.justification = c("left", "bottom"), legend.background = element_blank(), legend.spacing.y = unit(0.1,"lines"))
   
-  p2 = rbind(cb.data, cb.data2) %>% ggplot(aes(x=index, y=umi,col=filter))+geom_line()+
-    scale_x_log10()+scale_y_log10()+theme_bw()+ggtitle("SB UMI per cell")+ylab("SB UMI counts")+xlab("Cell barcodes")+
-    theme(legend.position = c(0.05, 0.05), legend.justification = c("left", "bottom"), legend.background = element_blank(), legend.spacing.y = unit(0.1,"lines"))
-  
-   return(list(p1,p2))
-  
+   return(list(p1, p2, sb_pct_in_called_cells))
 }
 umicurves = plotSBumicurves(df)
+Misc(obj, "SB_reads_pct_in_called_cells") <- umicurves[[3]]
+
+Misc(obj, "SB_umi_downsampling") <- f("metadata/downsampling")
+Misc(obj, "SB_umi_final") <- df %>% count_umis %>% pull(umi) %>% sum
 
 # remove reads that didn't match a called cell
-reads_before_cb_filter = sum(df$reads)
 df %<>% filter(cb_index>0)
-reads_after_cb_filter = sum(df$reads)
+
+gc()
 
 # load the puck information
 pucks = f("puck/puck_list") ; stopifnot(len(pucks)==1)
 puckdf = data.frame(sb=f("puck/sb"), x=f("puck/x"), y=f("puck/y"), puck_index=f("puck/puck_index"))
 stopifnot(unique(puckdf$puck_index)==1)
 puckdf = puckdf[match(sb_list,puckdf$sb),]
-stopifnot(puckdf$sb == sb_list) ; rm(sb_list)
+stopifnot(puckdf$sb == sb_list)
 bn = nrow(puckdf)
 if (bn < 150000) {
   k = 0.73
@@ -216,6 +305,11 @@ if (bn < 150000) {
 }
 puckdf %<>% transmute(sb_index = 1:nrow(puckdf), x_um = x*k, y_um = y*k)
 
+Misc(obj, "num_beads") <- bn
+Misc(obj, "scaling_factor") <- k
+
+rm(sb_list, bn, k)
+
 gc()
 
 ### Positioning methods ########################################################
@@ -223,25 +317,37 @@ gc()
 chunk_vector <- function(v, chunk_size) {return(split(v, ceiling(seq_along(v) / chunk_size)))}
 
 # Do a grid search to find the ideal DBSCAN parameters
+ncores = 15L ; plan(multisession, workers=ncores)
 opt_dbscan <- function(data.list) {
-  eps.vec = c(50) ; minPts.vec = c(3:500)
-  params = expand.grid(eps.vec,minPts.vec) %>% setNames(c("eps","minPts"))
-  row_lists = chunk_vector(1:nrow(params), round(nrow(params)/30))
+  eps.vec = c(50) ; minPts.vec = c(3:52)
+  res = data.frame() ; i = 0
+  repeat{
+    params = expand.grid(eps.vec,minPts.vec) %>% setNames(c("eps","minPts"))
+    row_lists = chunk_vector(1:nrow(params), round(nrow(params)/ncores))
 
-  plan(multisession, workers=30L)
-  params$pct = furrr::future_map(row_lists, function(v) {
-    map_dbl(v, function(i) {
-      m = map_lgl(data.list, ~max(dbscan::dbscan(.[c("x_um","y_um")], eps=params$eps[[i]], minPts=params$minPts[[i]], weights=.$umi)$cluster) == 1)
-      return(sum(m)/length(m))
-    })
-  }, .options=furrr_options(seed=T)) %>% flatten_dbl
+    params$pct = furrr::future_map(row_lists, function(v) {
+      map_dbl(v, function(i) {
+        m = map_lgl(data.list, ~max(dbscan::dbscan(.[c("x_um","y_um")], eps=params$eps[[i]], minPts=params$minPts[[i]], weights=.$umi)$cluster) == 1)
+        return(sum(m)/length(m))
+      })
+    }, .options=furrr_options(seed=T)) %>% flatten_dbl
+    
+    res = rbind(res, params)
+    
+    if (which.max(res$pct)<0.9*nrow(res) || i >= 20) {
+      break
+    }
+    
+    minPts.vec = minPts.vec + 50
+    i = i + 1
+  }
   
+  params = res ; rm(res)
   params$is.max = params$pct==max(params$pct)
-  
   eps = params$eps[params$is.max][[1]] ; minPts = params$minPts[params$is.max][[1]]
   print(g("Optimal eps: {eps}    Optimal minPts: {minPts}    %placed: {round(max(params$pct)*100,2)}"))
   
-  return(c(eps,minPts,max(params$pct)))
+  return(c(eps,minPts))
 }
 
 # Add the DBSCAN clusters to the dataframes
@@ -255,24 +361,20 @@ run_dbscan <- function(data.list, eps, minPts) {
 # assign centroid and record metadata
 create_coords <- function(data.list) {
   lapply(data.list, function(df) {
+    p = c(x_um=NA,
+          y_um=NA,
+          DBSCAN_clusters=max(df$cluster),
+          num_SBumi = sum(df$origumi),
+          SNR=NA,
+          SB_bin = unique(df$bin) %>% {ifelse(is.null(.), NA, .)})
     if (max(df$cluster) == 1) {
       sdf = dplyr::filter(df, cluster==1)
-      p = c(x_um = matrixStats::weightedMedian(sdf$x_um,w=sdf$umi),
-            y_um = matrixStats::weightedMedian(sdf$y_um,w=sdf$umi),
-            DBSCAN_clusters = 1,
-            num_SBumi = sum(df$origumi),
-            SNR = sum(sdf$origumi)/sum(df$origumi),
-            SB_bin=unique(df$bin)#,
-            # a = max(df$z1),
-            # b = max(df$z2),
-            # c = max(sdf$z1),
-            # d = max(sdf$z2)
-            )
-    } else {
-      p = c(x_um=NA,y_um=NA,DBSCAN_clusters=max(df$cluster),num_SBumi=sum(df$origumi),SNR=NA,SB_bin=unique(df$bin))#,z1=NA,z2=NA)
-      #p = NA
+      p[["x_um"]] = matrixStats::weightedMedian(sdf$x_um,w=sdf$umi)
+      p[["y_um"]] = matrixStats::weightedMedian(sdf$y_um,w=sdf$umi)
+      p[["SNR"]] = sum(sdf$origumi)/sum(df$origumi)
     }
-  }) %>% {do.call(rbind,.)} %>% as.data.frame %>% mutate(cb_index=names(data.list)) %>% select(cb_index, everything())
+    return(p)
+  }) %>% bind_rows %>% as.data.frame %>% mutate(cb_index=as.numeric(names(data.list))) %>% select(cb_index, everything())
 }
 
 # Run these methods on the entire data
@@ -282,13 +384,13 @@ normal_positioning <- function(df) {
   params = opt_dbscan(data.list)
   data.list %<>% run_dbscan(eps=params[[1]], minPts=params[[2]])
   coords <- create_coords(data.list)
+  coords %<>% mutate(eps=params[[1]],minPts=params[[2]])
   return(coords)
 }
 
 # Split the data into 10 SB UMI buckets and run on each
 binned_positioning <- function(df) {
   stopifnot("umi" %in% colnames(df)) # if this fails, you haven't grouped by cb,sb and counted umis
-  
   data.list = split(df, df$cb_index)
   
   # create the deciles
@@ -299,11 +401,14 @@ binned_positioning <- function(df) {
   
   # run positioning on each decile
   data.list = map2(data.lists,quants[-1],function(data.list,quant) {
+    if (len(data.list) == 0) {print(g({"skipping quantile, empty"}));return(list())}
     params = opt_dbscan(data.list)
     data.list %<>% run_dbscan(eps=params[[1]], minPts=params[[2]])
-    data.list %<>% map(~mutate(.,bin=quant))
+    data.list %<>% map(~mutate(.,bin=quant,eps=params[[1]],minPts=params[[2]]))
     return(data.list)
   }) %>% list_flatten
+  
+  stopifnot(len(data.list)==len(unique(df$cb_index)))
   
   coords <- create_coords(data.list)
   return(coords)
@@ -311,23 +416,13 @@ binned_positioning <- function(df) {
 
 ### Positioning ################################################################
 
-# old_df = df
-# old_obj = obj
-
 # Perform positioning at various levels of downsampling
-nreads = sum(df$reads)
-reads_cumsum = map(1:nrow(df),~rep(.,df$reads[[.]])) %>% flatten_int
 original_df <- df ; rm(df)
 coords_list = list()
-for (i in seq(0.05,1,0.05)) {
+for (i in seq(1,1,0.05)) {
   print(g("Downsampling: {round(i*100)}%"))
-  
-  # downsample the dataframe
-  newreads = sample(reads_cumsum,round(nreads*i),replace=F) %>% table %>% as.data.frame %>% setNames(c("row","newreads"))
-  df <- original_df %>% mutate(row=1:nrow(original_df)) %>% merge(newreads,by="row") %>% mutate(reads=newreads) %>% select(-newreads,-row)
-  
-  # group by cb,sb to count umis
-  df %<>% group_by(cb_index,sb_index) %>% summarize(umi=n()) %>% ungroup %>% arrange(desc(umi))
+  df = original_df %>% mutate(reads=rmultinom(n=1, size=round(sum(original_df$reads)*i), prob=original_df$reads) %>% as.vector)
+  df %<>% count_umis
   
   # correct for bead loss (downsample beads above 256 umi)
   maxumi = 256
@@ -342,11 +437,11 @@ for (i in seq(0.05,1,0.05)) {
 }
 
 # clean up
-rm(original_df) ; rm(puckdf)
+# rm(original_df) ; rm(puckdf)
 
 # merge with seurat object
 coords <- tail(coords_list,1)[[1]]
-coords %<>% mutate(cb=cb_whitelist[as.numeric(cb_index)])
+coords %<>% mutate(cb=cb_whitelist[cb_index])
 rownames(coords) = paste0(coords$cb,"-1")
 obj = AddMetaData(obj,coords)
 
@@ -359,6 +454,10 @@ qsave(obj, "seurat.qs")
 ################################################################################
 ### CREATE PDF #################################################################
 ################################################################################
+
+stop()
+
+print("Making summary.pdf")
 
 system("mkdir plots")
 
@@ -374,7 +473,13 @@ make.pdf <- function(plots,name,w,h) {
 ### Page 0: cell ranger output #################################################
 
 if (file.exists("RNAcounts/metrics_summary.csv")) {
-  plotdf = read.table("RNAcounts/metrics_summary.csv",header=F,comment.char="",sep=",") %>% t
+  plotdf = read.table("RNAcounts/metrics_summary.csv",header=F,comment.char="",sep=",")
+  if (nrow(plotdf)==2) { # count
+    plotdf %<>% t
+  } else if (ncol(plotdf)==6) { # multi
+    colnames(plotdf) = as.character(plotdf[1,])
+    plotdf = plotdf[-1,c(5,6)]
+  }
   rownames(plotdf) = NULL
   plot = plot_grid(ggdraw()+draw_label(""),
                    ggdraw()+draw_label("Cell Ranger Metrics Summary"),
@@ -395,27 +500,40 @@ UvsI <- function(obj) {
                              reads=fetch("count"))
   
   nreads = sum(molecule_info$reads)
-  reads_cumsum = map(1:nrow(molecule_info), function(i){rep(i,molecule_info$reads[[i]])}) %>% flatten_int()
+  reads_cumsum = map(1:nrow(molecule_info), function(i){rep(i,molecule_info$reads[[i]])}) %>% flatten_int
   downsampling = map_int(seq(0,1,0.05),function(p){len(unique(sample(reads_cumsum,round(nreads*p),replace=F)))})
   plotdf = data.frame(x=seq(0,1,0.05)*nreads/1000/1000,y=downsampling/1000/1000)
   p0 = ggplot(plotdf, aes(x=x,y=y))+geom_line()+theme_bw()+xlab("Millions of reads")+ylab("Millions of filtered UMIs")+ggtitle("RNA Downsampling curve")
   
   df = molecule_info %>% group_by(barcode) %>% summarize(umi=n(), pct.intronic=sum(umi_type==0)/umi) %>% arrange(desc(umi)) %>% mutate(logumi=log10(umi))
   
-  p1 = df %>% filter(umi>50) %>% ggplot(aes(x = logumi, y = pct.intronic)) + 
-    geom_bin2d(bins=100) +
-    scale_fill_viridis(trans="log", option="A", name="density") + 
-    theme_minimal() +
-    labs(title = "Intronic vs. UMI droplets (>50 umi)", x = "logumi", y = "%intronic") & NoLegend()
-  
-  max_density_x = density(filter(df,umi>500,pct.intronic>0.3)$pct.intronic) %>% {.$x[which.max(.$y)]}
-  p2 = df %>% filter(umi>500) %>% ggplot(aes(x = pct.intronic)) +
-    geom_density() + 
-    theme_minimal() +
-    labs(title = "Intronic density (>500 umi)", x = "%intronic", y = "Density") + 
-    geom_vline(xintercept = max_density_x, color = "red", linetype = "dashed") +
-    annotate(geom = 'text', label = round(max_density_x, 2), x = max_density_x+0.01, y = Inf, hjust = 0, vjust = 1, col="red")
-  
+  if (!all(df$pct.intronic==0)) {
+    if (sum(df$umi>=50)==0) {
+      p1 = df %>% filter(umi>=50) %>% ggplot(aes(x = logumi, y = pct.intronic)) + 
+        geom_bin2d(bins=100) +
+        scale_fill_viridis(trans="log", option="A", name="density") + 
+        theme_minimal() +
+        labs(title = "Intronic vs. UMI droplets (>50 umi)", x = "logumi", y = "%intronic") & NoLegend()
+    } else {
+      p1 = ggdraw()+draw_label("No cells with 50+ UMI")
+    }
+    
+    if (sum(df$umi>=500)==0) {
+      max_density_x = density(filter(df,umi>=500)$pct.intronic) %>% {.$x[which.max(.$y)]}
+      p2 = df %>% filter(umi>=500) %>% ggplot(aes(x = pct.intronic)) +
+        geom_density() + 
+        theme_minimal() +
+        labs(title = "Intronic density (>500 umi)", x = "%intronic", y = "Density") + 
+        geom_vline(xintercept = max_density_x, color = "red", linetype = "dashed") +
+        annotate(geom = 'text', label = round(max_density_x, 2), x = max_density_x+0.01, y = Inf, hjust = 0, vjust = 1, col="red")
+    } else {
+      p2 = ggdraw()+draw_label("No cells with 500+ UMI")
+    }
+  } else {
+    p1 = ggdraw()+draw_label("No intronic information")
+    p2 = ggdraw()+draw_label("No intronic information")
+  }
+
   df %<>% mutate(index = 1:nrow(df),called=barcode%in%colnames(obj))
   p3 = ggplot(df,aes(x=index,y=umi,col=called))+geom_line()+theme_bw()+scale_x_log10()+scale_y_log10()+
     ggtitle("Barcode rank plot")+xlab("Barcodes")+ylab("UMI counts") +
@@ -442,9 +560,31 @@ make.pdf(plot,"plots/2umap.pdf",7,8)
 
 ### Page 3: FeaturePlots #####################################################
 
-plot = FeaturePlot(obj,c("MBP","PLP1","CSPG5","VCAN","AQP4","GFAP","FLT1","DCN","CX3CR1","GAD1", "GAD2", "RELN","SLC17A6","SLC17A7", "TH", "NR4A2"))&theme_void()+
-  theme(legend.key.width=unit(0.3,"cm"), plot.title=element_text(hjust=0.5)) & coord_fixed(ratio=1)
-make.pdf(plot,"plots/3features.pdf",7,8)
+human_genes = c("MBP","PLP1","CSPG5","VCAN","AQP4","GFAP","FLT1","DCN","CX3CR1","GAD1", "GAD2", "RELN","SLC17A6","SLC17A7", "TH", "NR4A2")
+mouse_genes = c("Slc17a7", "Slc17a6", "Aqp4","Plp1","Rgs5","Matn4","Resp18","Nrp2","Meis2")
+
+if (sum(human_genes%in%rownames(obj)>0)) {
+  print("Human genes detected")
+  genes=human_genes
+} else if (sum(mouse_genes%in%rownames(obj)>0)) {
+  print("Mouse genes detected")
+  genes=mouse_genes
+} else {
+  print("No mouse or human genes detected")
+  genes = c()
+}
+
+if (len(genes) > 0) {
+  plot1 = FeaturePlot(obj,genes)&theme_void()+
+    theme(legend.key.width=unit(0.3,"cm"), plot.title=element_text(hjust=0.5)) & coord_fixed(ratio=1)
+  plot2 = FeaturePlot(obj,genes,reduction="spatial")&theme_void()+
+    theme(legend.key.width=unit(0.3,"cm"), plot.title=element_text(hjust=0.5)) & coord_fixed(ratio=1)
+} else {
+  plot1 = ggdraw()+draw_label("No human or mouse marker genes found")
+  plot2 = ggdraw()+draw_label("No human or mouse marker genes found")
+}
+make.pdf(plot1,"plots/3features.pdf",7,8)
+make.pdf(plot2,"plots/8sfeatures.pdf",7,8)
 
 ### Page 4: Raw spatial data ###################################################
 
@@ -516,7 +656,7 @@ plot = plot_grid(DimPlot(obj,reduction="spatial")+coord_fixed(ratio=1)+ggtitle(g
 
 make.pdf(plot,"plots/7spatial.pdf",7,8)
 
-### Create metrics plot ########################################################
+### Page 9: Create metrics plot ################################################
 
 Rs = data.frame(R1=f("metadata/R1s") %>% map_chr(basename),
                 R2=f("metadata/R2s") %>% map_chr(basename))
@@ -561,10 +701,10 @@ metricplot = plot_grid(
           ggdraw()+draw_label("FASTQ paths"), plot.tab(Rs),
           rel_heights=c(3.5,4.5,0.4,2), ncol=1)
 
-make.pdf(metricplot,"plots/8metrics.pdf",7,8)
+make.pdf(metricplot,"plots/9metrics.pdf",7,8)
 
 ### Sample bead plots ##########################################################
-
+# 
 # cols = list(c("steelblue4","steelblue1"),c("red4","red1"),c("springgreen4","springgreen1"))
 # plot.sb <- function(subdf) {
 #   nlegend = min(4,max(subdf$cluster))
@@ -588,7 +728,7 @@ make.pdf(metricplot,"plots/8metrics.pdf",7,8)
 # p3 = plot_grid(ggdraw()+draw_label("DBSCAN>=2"), map(sample(list2,16,replace=F),plot.sb) %>% {plot_grid(plotlist=.,ncol=4)}, ncol=1,rel_heights=c(0.1,2))
 # 
 # make.pdf(list(p1,p2,p3),"plots/SB.pdf",10,10)
-# 
+
 # legend.key.size,
 # legend.text,
 # legend.text.align,
@@ -596,21 +736,12 @@ make.pdf(metricplot,"plots/8metrics.pdf",7,8)
 # legend.box,
 # legend.box.just,
 # legend.box.spacing
-# 
-# obj$numbead = unname(map_int(list1,~sum(.$cluster==2)))[match(obj$cb, obj$cb[unname(map_int(list1,~unique(.$cb_index)))] %>% unname)]
-# obj$numbeadlog = log10(obj$numbead)
-# obj$bnb=obj$numbead<2
-# 
-# pt = map(unique(obj$seurat_clusters) %>% sort, ~DimPlot(obj[,obj$seurat_clusters==.],group.by="bnb",reduction="spatial")+theme_void()) %>% {plot_grid(plotlist=.,ncol=7)}
-# pt
-# 
-# pt = map(unique(obj$seurat_clusters) %>% sort, ~FeaturePlot(obj[,obj$seurat_clusters==.],features="numbeadlog",reduction="spatial")+theme_void()+ggtitle(.)) %>% {plot_grid(plotlist=.,ncol=7)}
-# pt
-# 
-# obj[,obj$seurat_clusters==2] %>% DimPlot(group.by="bnb",reduction="spatial")
 
 ### Save output ################################################################
 
-pdfs = c("0cellranger.pdf","1cellcalling.pdf", "2umap.pdf", "3features.pdf", "4rawspatial.pdf", "5beadplot.pdf", "6DBSCAN.pdf","7spatial.pdf","8metrics.pdf") %>% paste0("plots/",.)
+pdfs = c("0cellranger.pdf","1cellcalling.pdf", "2umap.pdf", "3features.pdf", "4rawspatial.pdf", "5beadplot.pdf", "6DBSCAN.pdf","7spatial.pdf","8sfeatures.pdf","9metrics.pdf") %>% paste0("plots/",.)
 qpdf::pdf_combine(input = pdfs, output = "summary.pdf")
 
+print("Done!")
+
+RNAtech
