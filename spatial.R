@@ -22,6 +22,9 @@ library(qs)
 
 # setwd("~/pip/")
 
+# RNApath = "gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/03_COUNTS/230411_VL00297_168_AACMJCLM5/SI-TT-A9"
+# SBpath = "gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/04_SPATIAL/230411_VL00297_168_AACMJCLM5/SI-NT-A9"
+
 # RNApath = "gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/03_COUNTS/230317_SL-NSA_0564_AHVCHWDRX2/SI-TT-E11"
 # SBpath = "gs://fc-fc3a2afa-6861-4da5-bb37-60ebb40f7e8d/04_SPATIAL/230317_SL-NSA_0564_AHVCHWDRX2/SI-NT-C4"
 
@@ -227,9 +230,15 @@ df %<>% mutate(exact = exact_dict[cb_index], HD1 = fuzzy_dict[cb_index])
 rm(exact_dict) ; rm(fuzzy_dict)
 
 # Write metadata
-Misc(obj, "SB_reads_filtered_exact") <- df %>% filter(!is.na(exact)) %>% pull(reads) %>% sum
-Misc(obj, "SB_reads_filtered_HD1") <- df %>% filter(!is.na(HD1)) %>% pull(reads) %>% sum
-Misc(obj, "SB_reads_filtered_HD1ambig") <- df %>% filter(cb_index %in% match(HD1ambig,cb_list)) %>% pull(reads) %>% sum
+CB_matching_type = c("HD1ambig","exact","none","HD1")
+CB_matching_count = c(df %>% filter(cb_index %in% match(HD1ambig,cb_list)) %>% pull(reads) %>% sum,
+                      df %>% filter(!is.na(exact)) %>% pull(reads) %>% sum,
+                      0,
+                      df %>% filter(!is.na(HD1)) %>% pull(reads) %>% sum)
+CB_matching_count[[3]] = Misc(obj,"SB_reads_filtered") - sum(CB_matching_count)
+Misc(obj,"CB_matching_type") = CB_matching_type
+Misc(obj,"CB_matching_count") = CB_matching_count
+
 rm(cb_list) ; rm(HD1ambig)
 gc()
 # stopifnot(table(!is.na(df$exact),!is.na(df$HD1))["TRUE","TRUE"] == 0) # exact and fuzzy matches should be distinct
@@ -349,9 +358,10 @@ opt_dbscan <- function(data.list) {
   params = res ; rm(res)
   params$is.max = params$pct==max(params$pct)
   eps = params$eps[params$is.max][[1]] ; minPts = params$minPts[params$is.max][[1]]
-  print(g("Optimal eps: {eps}    Optimal minPts: {minPts}    %placed: {round(max(params$pct)*100,2)}"))
+  pct.placed = round(max(params$pct)*100,2)
+  print(g("Optimal eps: {eps}    Optimal minPts: {minPts}    %placed: {pct.placed}"))
   
-  return(c(eps,minPts))
+  return(c(eps,minPts,pct.placed))
 }
 
 # Add the DBSCAN clusters to the dataframes
@@ -364,7 +374,7 @@ run_dbscan <- function(data.list, eps, minPts) {
 
 # assign centroid and record metadata
 create_coords <- function(data.list) {
-  lapply(data.list, function(df) {
+  coords = lapply(data.list, function(df) {
     p = c(x_um=NA,
           y_um=NA,
           DBSCAN_clusters=max(df$cluster),
@@ -372,7 +382,8 @@ create_coords <- function(data.list) {
           SNR=NA,
           SB_bin = unique(df$bin) %>% {ifelse(is.null(.), NA, .)},
           minPts = unique(df$minPts) %>% {ifelse(is.null(.), NA, .)},
-          eps = unique(df$eps) %>% {ifelse(is.null(.), NA, .)})
+          eps = unique(df$eps) %>% {ifelse(is.null(.), NA, .)},
+          pct.placed = unique(df$pct.placed) %>% {ifelse(is.null(.), NA, .)})
     if (max(df$cluster) == 1) {
       sdf = dplyr::filter(df, cluster==1)
       p[["x_um"]] = matrixStats::weightedMedian(sdf$x_um,w=sdf$umi)
@@ -381,6 +392,7 @@ create_coords <- function(data.list) {
     }
     return(p)
   }) %>% bind_rows %>% as.data.frame %>% mutate(cb_index=as.numeric(names(data.list))) %>% select(cb_index, everything())
+  return(coords)
 }
 
 # Run these methods on the entire data
@@ -389,9 +401,9 @@ normal_positioning <- function(df) {
   data.list = split(df, df$cb_index)
   params = opt_dbscan(data.list)
   data.list %<>% run_dbscan(eps=params[[1]], minPts=params[[2]])
+  data.list %<>% map(~mutate(.,bin=quant,eps=params[[1]],minPts=params[[2]],pct.placed=params[[3]]))
   coords <- create_coords(data.list)
-  coords %<>% mutate(eps=params[[1]],minPts=params[[2]])
-  return(coords)
+  return(list(coords,data.list))
 }
 
 # Split the data into 10 SB UMI buckets and run on each
@@ -410,14 +422,14 @@ binned_positioning <- function(df) {
     if (len(data.list) == 0) {print(g({"skipping quantile, empty"}));return(list())}
     params = opt_dbscan(data.list)
     data.list %<>% run_dbscan(eps=params[[1]], minPts=params[[2]])
-    data.list %<>% map(~mutate(.,bin=quant,eps=params[[1]],minPts=params[[2]]))
+    data.list %<>% map(~mutate(.,bin=quant,eps=params[[1]],minPts=params[[2]],pct.placed=params[[3]]))
     return(data.list)
   }) %>% list_flatten
   
   stopifnot(len(data.list)==len(unique(df$cb_index)))
   
   coords <- create_coords(data.list)
-  return(coords)
+  return(list(coords,data.list))
 }
 
 ### Positioning ################################################################
@@ -447,20 +459,8 @@ for (i in seq(0.05,1,0.05)) {
   df = merge(x=df,y=puckdf,all.x=T,by="sb_index")
   
   # run binned positioning (see method above)
-  data.list = split(df, df$cb_index)
-  quants = c(0,quantile(map_dbl(data.list,~sum(.$umi)), probs = seq(0.1, 1, by = .1))) %>% unname
-  paste("Deciles: ", paste(round(quants),collapse=" "))
-  umicounts = map(data.list,~sum(.$umi))
-  data.lists=map(1:(len(quants)-1),~data.list[umicounts>quants[.] & umicounts<=quants[.+1]])
-  data.list = map2(data.lists,quants[-1],function(data.list,quant) {
-    if (len(data.list) == 0) {print(g({"skipping quantile, empty"}));return(list())}
-    params = opt_dbscan(data.list)
-    data.list %<>% run_dbscan(eps=params[[1]], minPts=params[[2]])
-    data.list %<>% map(~mutate(.,bin=quant,eps=params[[1]],minPts=params[[2]]))
-    return(data.list)
-  }) %>% list_flatten
-  stopifnot(len(data.list)==len(unique(df$cb_index)))
-  coords <- create_coords(data.list)
+  res = binned_positioning(df)
+  coords = res[[1]] ; data.list = res[[2]]
   
   coords_list %<>% list.append(coords)
   gc()
@@ -588,33 +588,6 @@ plot = plot_grid(DimPlot(obj,label=T)+ggtitle(g("UMAP"))+NoLegend()+theme(plot.t
                  ncol=2)
 make.pdf(plot,"plots/2umap.pdf",7,8)
 
-### Page 3: FeaturePlots #####################################################
-
-human_genes = c("MBP","PLP1","CSPG5","VCAN","AQP4","GFAP","FLT1","DCN","CX3CR1","GAD1", "GAD2", "RELN","SLC17A6","SLC17A7", "TH", "NR4A2")
-mouse_genes = c("Slc17a7", "Slc17a6", "Aqp4","Plp1","Rgs5","Matn4","Resp18","Nrp2","Meis2")
-
-if (sum(human_genes%in%rownames(obj)>0)) {
-  print("Human genes detected")
-  genes=human_genes
-} else if (sum(mouse_genes%in%rownames(obj)>0)) {
-  print("Mouse genes detected")
-  genes=mouse_genes
-} else {
-  print("No mouse or human genes detected")
-  genes = c()
-}
-
-if (len(genes) > 0) {
-  plot1 = FeaturePlot(obj,genes)&theme_void()+
-    theme(legend.key.width=unit(0.3,"cm"), plot.title=element_text(hjust=0.5)) & coord_fixed(ratio=1)
-  plot2 = FeaturePlot(obj,genes,reduction="spatial")&theme_void()+
-    theme(legend.key.width=unit(0.3,"cm"), plot.title=element_text(hjust=0.5)) & coord_fixed(ratio=1)
-} else {
-  plot1 = ggdraw()+draw_label("No human or mouse marker genes found")
-  plot2 = ggdraw()+draw_label("No human or mouse marker genes found")
-}
-make.pdf(plot1,"plots/3features.pdf",7,8)
-make.pdf(plot2,"plots/8sfeatures.pdf",7,8)
 
 ### Page 4: Raw spatial data ###################################################
 
@@ -704,7 +677,9 @@ p2 = obj@meta.data %>% filter(!is.na(x_um)) %>% ggplot(aes(x = SNR)) +
 p3 = data.frame(x=obj$nCount_RNA,y=obj$num_SBumi,placed=!is.na(obj$x_um)) %>% {ggplot(.,aes(x=log10(x),y=log10(y),col=placed))+geom_point(size=0.2)+theme_bw()+xlab("RNA UMI")+ylab("SB UMI")+ggtitle("SB UMI vs. RNA UMI")+theme(legend.position = c(0.95, 0.05), legend.justification = c("right", "bottom"), legend.background = element_blank(), legend.title=element_text(size=10), legend.text=element_text(size=8), legend.margin=margin(0,0,0,0,"pt"), legend.box.margin=margin(0,0,0,0,"pt"), legend.spacing.y = unit(0.1,"lines"), legend.key.size = unit(0.5, "lines"))}
 
 # Panel 4: DBSCAN parameters
-p4 = coords %>% select(SB_bin,minPts,eps) %>% distinct %>% arrange(SB_bin) %>% mutate(SB_bin=round(SB_bin,2)) %>% plot.tab
+df = coords %>% select(SB_bin,minPts,eps,pct.placed) %>% distinct %>% arrange(SB_bin) %>% mutate(SB_bin=round(SB_bin,2),pct.placed=round(pct.placed,2) %>% paste0("%"))
+rownames(df) <- NULL
+p4 = plot.tab(df)
 
 plot = plot_grid(p1,p2,p3,p4,ncol=2)
 make.pdf(plot,"plots/6DBSCAN.pdf",7,8)
@@ -730,8 +705,7 @@ p1 = plot_grid(ggdraw()+draw_label("SB metrics"), plot.tab(df),ncol=1,rel_height
 
 UP_matching <- setNames(Misc(obj,"UP_matching_count"),Misc(obj,"UP_matching_type"))
 SB_matching <- setNames(Misc(obj,"SB_matching_count"),Misc(obj,"SB_matching_type"))
-CB_matching <- setNames(map_int(c("SB_reads_filtered_exact","SB_reads_filtered_HD1","SB_reads_filtered_HD1ambig"),~Misc(obj,.)), c("exact","fuzzy","ambig"))
-CB_matching["none"] <- Misc(obj,"SB_reads_filtered") - sum(CB_matching)
+CB_matching <- setNames(Misc(obj,"CB_matching_count"),Misc(obj,"CB_matching_type"))
 
 df = data.frame(a=c("exact","fuzzy", "none", "GG"),b=c(UP_matching[["-"]],sum(UP_matching[c("1D-","1D-1X","-1X","-1D","-2X")]),UP_matching[["none"]],UP_matching[["GG"]]) %>% {./sum(.)*100} %>% round(2) %>% paste0("%")) %>% arrange(desc(b)) %>% unname
 p2 = plot_grid(ggdraw()+draw_label("UP matching"), plot.tab(df),ncol=1,rel_heights=c(0.1,0.9))
@@ -739,21 +713,24 @@ p2 = plot_grid(ggdraw()+draw_label("UP matching"), plot.tab(df),ncol=1,rel_heigh
 df = data.frame(a=c("exact","fuzzy","none","ambig"),b=SB_matching[c("exact","HD1","none","HD1ambig")] %>% {./sum(.)*100} %>% round(2) %>% unname %>% paste0("%")) %>% unname
 p3 = plot_grid(ggdraw()+draw_label("SB matching"),plot.tab(df),ncol=1,rel_heights=c(0.1,0.9))
 
-df = data.frame(a=c("exact","fuzzy","none","ambig"),b=CB_matching[c("exact","fuzzy","none","ambig")] %>% {./sum(.)*100} %>% round(2) %>% unname %>% paste0("%")) %>% unname
+df = data.frame(a=c("exact","fuzzy","none","ambig"),b=CB_matching[c("exact","HD1","none","HD1ambig")] %>% {./sum(.)*100} %>% round(2) %>% unname %>% paste0("%")) %>% unname
 p4 = plot_grid(ggdraw()+draw_label("CB matching"),plot.tab(df),ncol=1,rel_heights=c(0.1,0.9))
 
 df = list(
   c("UMI filter",UP_matching[["R1lowQ"]]),
   c("GG seq",UP_matching[["GG"]]),
-  c("no UP",UP_matching[["none"]]),
-  c("no SB",SB_matching[["none"]]),
-  c("ambig SB",SB_matching[["HD1ambig"]]),
-  c("chimeric",Misc(obj,"SB_reads_filtered_chimeric")),
-  c("no CB",sum(CB_matching[c("none","ambig")]))
+  c("No UP",UP_matching[["none"]]),
+  c("No SB",SB_matching[["none"]]),
+  c("Ambig SB",SB_matching[["HD1ambig"]]),
+  c("Chimeric",Misc(obj,"SB_reads_filtered_chimeric")),
+  c("No CB",sum(CB_matching[c("none","HD1ambig")]))
 ) %>% {do.call(rbind,.)} %>% as.data.frame %>% setNames(c("filter","%removed"))
-df$`%removed` = as.numeric(df$`%removed`) / (Misc(obj,"SB_reads")-cumsum(df$`%removed`))
+df$`%removed` = as.numeric(df$`%removed`) / (Misc(obj,"SB_reads") - c(0,head(cumsum(df$`%removed`),-1)))
 df$`%removed`= round(df$`%removed` * 100,2) %>% paste0("%")
 p5 = plot_grid(ggdraw()+draw_label("SB filtering"),plot.tab(df),ncol=1,rel_heights=c(0.1,0.9))
+
+Misc(obj, "SB_filtering_type") <- df$filter
+Misc(obj, "SB_filtering_count") <- df$`%removed`
 
 # Script input parameters (with common prefix removed)
 a=Misc(obj,"RNA_path") ; b=Misc(obj,"SB_path")
@@ -782,12 +759,12 @@ plot.sb <- function(subdf) {
   nlegend = min(3,max(subdf$cluster))
   pts = lapply(1:nlegend,function(i){
     if (i <= 2) {
-      list(geom_point(data=filter(subdf,cluster==i),mapping=aes(x=x_um,y=y_um,col=origumi),size=0.5), scale_color_gradient(low=cols[[i]][[1]],high=cols[[i]][[2]],limits=limits,breaks=limits), new_scale_color())
+      list(geom_point(data=filter(subdf,cluster==i),mapping=aes(x=x_um,y=y_um,col=origumi),size=0.3), scale_color_gradient(low=cols[[i]][[1]],high=cols[[i]][[2]],limits=limits,breaks=limits), new_scale_color())
     } else {
-      list(geom_point(data=filter(subdf,cluster>=3),mapping=aes(x=x_um,y=y_um,col=origumi),size=0.5), scale_color_gradient(low=cols[[i]][[1]],high=cols[[i]][[2]],limits=limits,breaks=limits), new_scale_color())
+      list(geom_point(data=filter(subdf,cluster>=3),mapping=aes(x=x_um,y=y_um,col=origumi),size=0.3), scale_color_gradient(low=cols[[i]][[1]],high=cols[[i]][[2]],limits=limits,breaks=limits), new_scale_color())
     }
   })
-  Reduce(`+`,pts,init=ggplot())+coord_fixed(ratio=1,xlim=range(df$x_um),ylim=range(df$y_um))+theme_void()+
+  Reduce(`+`,pts,init=ggplot())+coord_fixed(ratio=1,xlim=range(puckdf$x_um),ylim=range(puckdf$y_um))+theme_void()+
     theme(legend.key.width=unit(0.5,"lines"), legend.position="right", legend.key.height=unit(0.3,"lines"), legend.title=element_blank(), legend.spacing.y=unit(0.2,"lines"), legend.margin=margin(0,0,0,0,"lines"), legend.box.margin=margin(0,0,0,0,"pt"), legend.box.background=element_blank(), legend.background=element_blank(), legend.direction="vertical", legend.justification="left",legend.box.just="left",legend.box.spacing=unit(0,"cm"))
 }
 
@@ -807,12 +784,10 @@ make.pdf(list(p1,p2,p3),"plots/SB.pdf",7,7)
 
 ### Save output ################################################################
 
-pdfs = c("0cellranger.pdf","1cellcalling.pdf", "2umap.pdf", "3features.pdf", "4rawspatial.pdf", "5beadplot.pdf", "6DBSCAN.pdf","7spatial.pdf","8sfeatures.pdf","9metrics.pdf","SB.pdf") %>% paste0("plots/",.)
+pdfs = c("0cellranger.pdf","1cellcalling.pdf", "2umap.pdf", "4rawspatial.pdf", "5beadplot.pdf", "6DBSCAN.pdf","7spatial.pdf","9metrics.pdf","SB.pdf") %>% paste0("plots/",.)
 qpdf::pdf_combine(input = pdfs, output = "summary.pdf")
 qsave(obj, "seurat.qs") # we added some more metadata while plotting
 
-# Adjust the plotting return
-# Adjust CB matching storage
 # Adjust origumi and umi_corrected
 
 print("Done!")
