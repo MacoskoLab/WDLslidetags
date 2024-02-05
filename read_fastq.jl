@@ -161,6 +161,8 @@ end
 println("Done")
 
 # UMI compressing (between 0x00000000 and 0x00ffffff)
+R1len = R1s[1] |> open |> GzipDecompressorStream |> FASTQ.Reader |> first |> FASTQ.sequence |> length
+R1len = min(R1len,28)
 px = [convert(UInt32,4^i) for i in 0:(R1len-16-1)]
 function UMItoindex(UMI::StringView{SubArray{UInt8, 1, Vector{UInt8}, Tuple{UnitRange{Int64}}, true}})::UInt32
     return(dot(px, (codeunits(UMI).>>1).&3))
