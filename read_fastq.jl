@@ -161,9 +161,9 @@ end
 println("Done")
 
 # UMI compressing (between 0x00000000 and 0x00ffffff)
-p12 = [convert(UInt32,4^i) for i in 0:11]
+px = [convert(UInt32,4^i) for i in 0:(R1len-16-1)]
 function UMItoindex(UMI::StringView{SubArray{UInt8, 1, Vector{UInt8}, Tuple{UnitRange{Int64}}, true}})::UInt32
-    return(dot(p12, (codeunits(UMI).>>1).&3))
+    return(dot(px, (codeunits(UMI).>>1).&3))
 end
 # bases = ['A','C','T','G']
 # function indextoUMI(i::UInt32)::String15
@@ -226,7 +226,7 @@ for fastqpair in zip(R1s,R2s)
         r2 = FASTQ.sequence(record[2], 1:32)
         global reads += 1
 
-        occursin('N', r1[17:28]) ? (m["R1lowQ"] += 1 ; continue) : nothing
+        occursin('N', r1[17:R1len]) ? (m["R1lowQ"] += 1 ; continue) : nothing
         
         sb_i = R2process(r2)
         sb_i>0 ? nothing : continue
@@ -238,7 +238,7 @@ for fastqpair in zip(R1s,R2s)
             cb_i = CBnum
         end
         
-        umi_i = UMItoindex(r1[17:28])
+        umi_i = UMItoindex(r1[17:R1len])
         key = (cb_i,umi_i,sb_i)
         mat[key] = get(mat,key,0) + 1
     end
