@@ -62,8 +62,9 @@ elseif (R1len >= 32) & (R2len < 32)
 else
     println("Learning the correct R1 and R2 assignment")
     s1 = 0 ; s2 = 0
+    UPseq = String31("TCTTCAGCGTTCCCGAGA")
     i1 = R1s[1] |> open |> GzipDecompressorStream |> FASTQ.Reader
-    i2 = R2s[2] |> open |> GzipDecompressorStream |> FASTQ.Reader
+    i2 = R2s[1] |> open |> GzipDecompressorStream |> FASTQ.Reader
     for (i,record) in enumerate(zip(i1, i2))
         i > 100000 ? break : nothing
         global s1 += FASTQ.sequence(record[1])[9:26] == UPseq
