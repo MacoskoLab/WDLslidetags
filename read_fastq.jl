@@ -193,7 +193,7 @@ end
 function R2process(r2::StringView{SubArray{UInt8, 1, Vector{UInt8}, Tuple{UnitRange{Int64}}, true}})::Int64
     if r2[9:26]==UPseq # exact match
         sb1=r2[1:8]; sb2=r2[27:32]; m["-"]+=1
-    elseif in(r2[9:26],UPseqHD1) # one base flip (m8ight be del at last base - could check cap seq)
+    elseif in(r2[9:26],UPseqHD1) # one base flip (might be del at last base - could check cap seq)
         sb1=r2[1:8]; sb2=r2[27:32]; m["-1X"]+=1
     elseif in(r2[9:26], GGset) # discard
         m["GG"]+=1; return(-1)
