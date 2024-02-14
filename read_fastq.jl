@@ -16,7 +16,6 @@ if length(ARGS) != 2
 end
 fastqpath = ARGS[1] ; println("FASTQs path: "*fastqpath) ; @assert isdir(fastqpath)
 puckpath = ARGS[2] ; println("Puck path: "*puckpath) ; @assert isdir(puckpath)
-CBdictpath = "3M-february-2018.txt" ; println("10X CB dictionary: "*CBdictpath) ; @assert isfile(CBdictpath)
 
 ################################################################################
 ##### Load the data ############################################################
@@ -29,7 +28,7 @@ R2s = filter(s -> occursin("_R2_", s), fastqs) ; println("R2s: ", basename.(R2s)
 @assert length(R1s) == length(R2s) > 0
 @assert [replace(R1, "_R1_"=>"", count=1) for R1 in R1s] == [replace(R2, "_R2_"=>"", count=1) for R2 in R2s]
 
-# load the pucks
+# Load the pucks
 pucks = readdir(puckpath,join=true) ; println("Pucks: ",basename.(pucks))
 puckdfs = [rename(CSV.read(puck,DataFrame,header=false), [:sb,:x,:y]) for puck in pucks]
 SBwhitelist = Set{String15}()
@@ -49,15 +48,19 @@ println("Total SB: $(length(SBwhitelist))")
 ##### Learn R1 and R2 ##########################################################
 ################################################################################
 
-# Switch R1 and R2 if needed
 switch = false
-R1len = R1s[1] |> open |> GzipDecompressorStream |> FASTQ.Reader |> first |> FASTQ.sequence |> length
-R2len = R2s[1] |> open |> GzipDecompressorStream |> FASTQ.Reader |> first |> FASTQ.sequence |> length
-if (R1len < 32) & (R2len < 32)
+
+function fastq_seq_len(path)
+    return(path |> open |> GzipDecompressorStream |> FASTQ.Reader |> first |> FASTQ.sequence |> length)
+end
+
+# Switch R1 and R2 if needed
+R1len = fastq_seq_len(R1s[1]) ; R2len = fastq_seq_len(R2s[1])
+if (R1len < 32) && (R2len < 32)
     error("Unexpected read structure: one fastq should have at least 32 characters")
-elseif (R1len < 32) & (R2len >= 32)
+elseif (R1len < 32) && (R2len >= 32)
     switch = false
-elseif (R1len >= 32) & (R2len < 32)
+elseif (R1len >= 32) && (R2len < 32)
     switch = true
 else
     println("Learning the correct R1 and R2 assignment")
@@ -104,6 +107,16 @@ function listHDneighbors(str, hd)
     end
     return(res)
 end
+function listHD1neighbors(str)
+    res = Set()
+    for i in 1:length(str)
+        for char in setdiff(charlist, str[i])
+            s = str[1:i-1]*string(char)*str[i+1:end]
+            push!(res,[s,i])
+        end
+    end
+    return(res)
+end
 function list1delneighbors(str)
     return([string(str[1:i-1], str[i+1:end]) for i in 1:length(str)])
 end
@@ -119,6 +132,38 @@ function expand_N(s::String15)::Vector{String15}
     return combins
 end
 
+# Store SB matches (==0 is ambiguous, >0 is unique, -1 is DNE)
+SBtoindex = Dict{Tuple{String15,String7},Tuple{UInt32,Int8}}()
+# Fuzzy matches
+for (i,sb) in enumerate(SBwhitelist)
+    numN = count(c -> c == 'N', sb)
+    if numN == 0
+        for (sb_f, ind) in listHD1neighbors(sb)
+            sbtuple = (sb_f[1:8],sb_f[9:14])
+            get(SBtoindex, sbtuple, (-1,0))[1] == -1 ? SBtoindex[sbtuple] = (i,ind) : SBtoindex[sbtuple] = (0,0)
+        end
+        sb2 = sb[9:14]
+        for (sb1, ind) in zip(list1delneighbors(sb[1:8]), 1:8)
+            sbtuple = (sb1,sb2)
+            get(SBtoindex, sbtuple, (-1,0))[1] == -1 ? SBtoindex[sbtuple] = (i,-ind) : SBtoindex[sbtuple] = (0,0)
+        end
+    elseif numN == 1
+        ind = findfirst(isequal('N'), sb)
+        for sb_f in expand_N(sb)
+            sbtuple = (sb_f[1:8],sb_f[9:14])
+            get(SBtoindex, sbtuple, (-1,0))[1] == -1 ? SBtoindex[sbtuple] = (i,ind) : SBtoindex[sbtuple] = (0,0)
+        end
+    end
+end
+print("end")
+# Exact matches
+for (i,sb) in enumerate(SBwhitelist)
+    if !occursin('N',sb)
+        sbtuple = (sb[1:8],sb[9:14])
+        SBtoindex[sbtuple] = (i,0)
+    end
+end
+
 # UP matching sets
 UPseq = String31("TCTTCAGCGTTCCCGAGA")
 UPseqHD1 = Set{String31}(listHDneighbors(UPseq, 1))
@@ -129,42 +174,13 @@ UPseqLD1 = Set{String31}(list1delneighbors(UPseq))
 GGseq = "GGGGGGGGGGGGGGGGGG"
 GGset = Set{String31}(reduce(union, [listHDneighbors(GGseq,i) for i in 0:3]))
 
-# store exact SB matches
-SBtoindex = Dict{Tuple{String15,String15},UInt32}()
-for (i,sb) in enumerate(SBwhitelist)
-    if !occursin('N',sb)
-        SBtoindex[(sb[1:8],sb[9:14])] = i
-    end
-end
-
-# store fuzzy SB matches (==0 is ambiguous, >0 is unique, -1 is DNE)
-SBtoindexHD1 = Dict{Tuple{String15,String15},UInt32}()
-for (i,sb) in enumerate(SBwhitelist)
-    if !occursin('N',sb)
-        for sb_f in listHDneighbors(sb,1)
-            sbtuple = (sb_f[1:8],sb_f[9:14])
-            get(SBtoindexHD1, sbtuple, i) == i ? SBtoindexHD1[sbtuple] = i : SBtoindexHD1[sbtuple] = 0
-        end
-        sb2 = sb[9:14]
-        for sb1 in list1delneighbors(sb[1:8])
-            sbtuple = (sb1,sb2)
-            get(SBtoindexHD1, sbtuple, i) == i ? SBtoindexHD1[sbtuple] = i : SBtoindexHD1[sbtuple] = 0
-        end
-    elseif count(c -> c == 'N', sb) <= 2
-        for sb_f in expand_N(sb)
-            sbtuple = (sb_f[1:8],sb_f[9:14])
-            get(SBtoindexHD1, sbtuple, i) == i ? SBtoindexHD1[sbtuple] = i : SBtoindexHD1[sbtuple] = 0
-        end
-    else
-        println("Too many N: ",sb)
-    end
-end
-println("Done")
+################################################################################
+##### Read the FASTQS ##########################################################
+################################################################################
 
 # UMI compressing (between 0x00000000 and 0x00ffffff)
-R1len = R1s[1] |> open |> GzipDecompressorStream |> FASTQ.Reader |> first |> FASTQ.sequence |> length
-R1len = min(R1len,28) ; @assert R1len>=25
-px = [convert(UInt32,4^i) for i in 0:(R1len-16-1)]
+R1len = min(fastq_seq_len(R1s[1]),28) ; @assert R1len>=25
+const px = [convert(UInt32,4^i) for i in 0:(R1len-16-1)]
 function UMItoindex(UMI::StringView{SubArray{UInt8, 1, Vector{UInt8}, Tuple{UnitRange{Int64}}, true}})::UInt32
     return(dot(px, (codeunits(UMI).>>1).&3))
 end
@@ -177,7 +193,7 @@ end
 function R2process(r2::StringView{SubArray{UInt8, 1, Vector{UInt8}, Tuple{UnitRange{Int64}}, true}})::Int64
     if r2[9:26]==UPseq # exact match
         sb1=r2[1:8]; sb2=r2[27:32]; m["-"]+=1
-    elseif in(r2[9:26],UPseqHD1) # one base flip (might be del at last base - could check cap seq)
+    elseif in(r2[9:26],UPseqHD1) # one base flip (m8ight be del at last base - could check cap seq)
         sb1=r2[1:8]; sb2=r2[27:32]; m["-1X"]+=1
     elseif in(r2[9:26], GGset) # discard
         m["GG"]+=1; return(-1)
@@ -194,31 +210,27 @@ function R2process(r2::StringView{SubArray{UInt8, 1, Vector{UInt8}, Tuple{UnitRa
     end
 
     key = (sb1, sb2)
-    res = get(SBtoindex, key, -1)
-    if res > 0
-        p["exact"]+=1
-        return(res)
-    end
-    res = get(SBtoindexHD1, key, -1)
-    if res > 0
-        p["HD1"]+=1
-    elseif res == 0
+    i, ind = get(SBtoindex, key, (-1,0))
+    if i > 0 && ind == 0
+        p["exact"]+=1 ; l[ind]+=1
+        return(i)
+    elseif i > 0
+        p["HD1"]+=1 ; l[ind]+=1
+        return(i)
+    elseif i == 0
         p["HD1ambig"]+=1
     else
         p["none"]+=1
     end
-    return(res)
+    return(i)
 end
-
-################################################################################
-##### Read the FASTQS ##########################################################
-################################################################################
 
 print("Reading FASTQS... ")
 
 reads = 0
 m = Dict("-"=>0,"-1X"=>0,"GG"=>0,"1D-"=>0,"1D-1X"=>0,"-1D"=>0,"-2X"=>0,"none"=>0,"R1lowQ"=>0)
 p = Dict("exact"=>0,"HD1"=>0,"HD1ambig"=>0,"none"=>0)
+l = Dict(i=>0 for i in collect(-8:14))
 CBwhitelist = Dict{String31,UInt32}() ; CBnum = 0
 mat = Dict{Tuple{UInt32, UInt32, UInt32},UInt32}()
 for fastqpair in zip(R1s,R2s)
@@ -249,8 +261,9 @@ end
 @assert reads == sum(values(m))
 @assert m["1D-"]+m["1D-1X"]+m["-"]+m["-1X"]+m["-1D"]+m["-2X"] == sum(values(p))
 @assert p["exact"]+p["HD1"] == sum(values(mat))
+@assert p["exact"] == l[0] && sum(values(l))-l[0] == p["HD1"]
+l = sort(DataFrame(k = l|>keys|>collect, v = l|>values|>collect), :k)
 empty!(SBtoindex)
-empty!(SBtoindexHD1)
 GC.gc()
 println("Done")
 
@@ -260,7 +273,7 @@ println("Done")
 
 print("Processing the results... ")
 
-# Turn matrix into dataframe
+# Turn matrix dictionary into dataframe
 df = DataFrame(cb = UInt32[], umi = UInt32[], sb = UInt32[], reads = UInt32[])
 for (key,value) in zip(keys(mat),values(mat))
      push!(df, (key[1],key[2],key[3],value))
@@ -275,13 +288,9 @@ sort!(CBwhitelist_df, :cb_i)
 GC.gc()
 
 # Remap the cell barcodes
-CBdf = CSV.File(CBdictpath, delim='\t', header=false) |> DataFrame
-@assert size(CBdf) == (6794880, 2)
-CBremap = Dict(CBdf[!, 2] .=> CBdf[!, 1])
-empty!(CBdf)
-CBwhitelist_df.cb_remap = [get(CBremap, cb, String31("")) for cb in CBwhitelist_df.cb]
-empty!(CBremap)
-GC.gc()
+remap = Dict("TC"=>"AG", "AG"=>"TC", "CA"=>"GT", "GT"=>"CA")
+CBwhitelist_df.cb_remap = [String31(cb[1:7]*get(remap,cb[8:9],"")*cb[10:16]) for cb in CBwhitelist_df.cb]
+CBwhitelist_df.cb_remap = (s->length(s)<16 ? String31("") : s).(CBwhitelist_df.cb_remap)
 
 # Concatenate the puck dataframes
 for (i,puckdf) in enumerate(puckdfs)
@@ -340,6 +349,8 @@ h5open("SBcounts.h5", "w") do file
     create_group(file, "metadata/SB_matching")
     file["metadata/SB_matching/type"] = keys(p) |> collect
     file["metadata/SB_matching/count"] = values(p) |> collect
+    file["metadata/SB_matching/position"] = l.k |> collect
+    file["metadata/SB_matching/position_count"] = l.v |> collect
     
     file["metadata/downsampling"] = downsampling
 end;
