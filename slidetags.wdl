@@ -164,7 +164,7 @@ task compute_sizes {
       # get the size of the fastqs and only run if the fastqs exist
       while IFS=$'\t' read -r index rest_of_line
       do
-        size=$(gsutil du -sce "*_I[0-9]_[0-9][0-9][0-9].fastq.gz" "gs://~{bucket}/02_FASTQS/~{bcl}/outs/fastq_path/*/$index_*_R*.fastq.gz" | grep total | awk '{print $1}')
+        size=$(gsutil du -sce "*_I[0-9]_[0-9][0-9][0-9].fastq.gz" "gs://~{bucket}/02_FASTQS/~{bcl}/**/$index_*_R*.fastq.gz" | grep total | awk '{print $1}')
         if [ "$size" -gt 0 ]; then
           echo $size | awk '{size=$1/1024/1024/1024 ; printf "%d\n", size+1}' >> SIZES
           echo -e "$index\t$rest_of_line" >> COUNTS.tsv
@@ -221,6 +221,7 @@ task RNAcounts {
       --fastqs=mkfastq/outs/fastq_path   \
       --sample=~{index}                  \
       --transcriptome=~{transcriptome}   \
+      --create-bam=true                  \
       --jobmode=local --disable-ui       \
       --nosecondary                      \
       --include-introns=true |& ts | tee -a ./RNAcounts.log
@@ -405,7 +406,7 @@ task SBcounts {
   }
   runtime {
     docker: docker
-    memory: "64 GB"
+    memory: "32 GB"
     disks: "local-disk ~{disksize} LOCAL"
     cpu: "1"
     preemptible: 0
@@ -460,7 +461,6 @@ task spatial {
     preemptible: 0
   }
 }
-
 
 # import "https://raw.githubusercontent.com/MacoskoLab/WDLslidetags/main/tasks.wdl" as tasks
 
