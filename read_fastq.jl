@@ -11,10 +11,9 @@ using Combinatorics: combinations
 
 # Read the command-line arguments
 if length(ARGS) != 2
-    println("Usage: julia readfastq.jl fastqpath puckpath")
-    @assert false
+    error("Usage: julia readfastq.jl fastqpath puckpath")
 end
-fastqpath = ARGS[1] ; println("FASTQs path: "*fastqpath) ; @assert isdir(fastqpath)
+fastqpath = ARGS[1] ; println("FASTQ path: "*fastqpath) ; @assert isdir(fastqpath)
 puckpath = ARGS[2] ; println("Puck path: "*puckpath) ; @assert isdir(puckpath)
 
 ################################################################################
@@ -22,22 +21,22 @@ puckpath = ARGS[2] ; println("Puck path: "*puckpath) ; @assert isdir(puckpath)
 ################################################################################
 
 # Load the FASTQ paths
-fastqs = readdir(fastqpath,join=true)
+fastqs = readdir(fastqpath, join=true)
 R1s = filter(s -> occursin("_R1_", s), fastqs) ; println("R1s: ", basename.(R1s))
 R2s = filter(s -> occursin("_R2_", s), fastqs) ; println("R2s: ", basename.(R2s))
 @assert length(R1s) == length(R2s) > 0
 @assert [replace(R1, "_R1_"=>"", count=1) for R1 in R1s] == [replace(R2, "_R2_"=>"", count=1) for R2 in R2s]
 
 # Load the pucks
-pucks = readdir(puckpath,join=true) ; println("Pucks: ",basename.(pucks))
-puckdfs = [rename(CSV.read(puck,DataFrame,header=false), [:sb,:x,:y]) for puck in pucks]
+pucks = readdir(puckpath, join=true) ; println("Pucks: ", basename.(pucks))
+puckdfs = [rename(CSV.read(puck, DataFrame, header=false), [:sb,:x,:y]) for puck in pucks]
 SBwhitelist = Set{String15}()
-for (puck,puckdf) in zip(pucks,puckdfs)
+for (puck, puckdf) in zip(pucks, puckdfs)
     println("Loaded $(basename(puck)): $(nrow(puckdf)) spatial barcodes found")
     @assert all(length(s) == 14 for s in puckdf.sb) "Some SB in $puck do not have 14bp"
     @assert length(puckdf.sb) == length(Set(puckdf.sb)) "Some SB in $puck are repeated"
     for sb in puckdf.sb
-        push!(SBwhitelist,sb)
+        push!(SBwhitelist, sb)
     end
 end
 SBwhitelist = collect(SBwhitelist)
