@@ -166,7 +166,6 @@ demultiplex = sheet.cell(row, sheet.find("Demultiplex").col).value
 assert demultiplex in ["YES","NO"]
 if demultiplex == "NO":
     assert len(RNAindexes) == len(SBindexes), "Demultiplex==NO, but the number of SBindexes and RNAindexes differs"
-    assert all(len(pucklist)<=1 for pucklist in pucks), "Demultiplex==NO, but one SB index has multiple pucks"
 print(f"Demultiplex: {demultiplex}")
 
 # Assert no commas, tabs, or spaces in any of the strings
