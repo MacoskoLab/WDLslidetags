@@ -15,15 +15,14 @@ using Combinatorics: combinations
 # - so be sure that these directories only contain the files for a specific run
 
 # Read the command-line arguments
-fastqpath, puckpath = ["fastqs","pucks"]
-# if length(ARGS) != 2
-#     error("Usage: julia readfastq.jl fastqpath puckpath")
-# end
-#fastqpath = ARGS[1]
+if length(ARGS) != 2
+    error("Usage: julia readfastq.jl fastqpath puckpath")
+end
+fastqpath = ARGS[1]
 println("FASTQ path: "*fastqpath)
 @assert isdir(fastqpath) "FASTQ path not found"
 @assert !isempty(readdir(fastqpath)) "FASTQ path is empty"
-#puckpath = ARGS[2]
+puckpath = ARGS[2]
 println("Puck path: "*puckpath)
 @assert isdir(puckpath) "Puck path not found"
 @assert !isempty(readdir(puckpath)) "Puck path is empty"
